@@ -112,10 +112,16 @@ cf_api() {
     ${body:+-d "$body"} "https://api.cloudflare.com/client/v4$path"
 }
 
+# The base domain may be the zone itself (example.com) or a subdomain of it
+# (dev.example.com), so walk up label by label until Cloudflare knows one.
 cf_zone_id() {
-  local zone="${BASE_DOMAIN#*.}"   # dev.example.com -> example.com
-  cf_api GET "/zones?name=$zone" |
-    python3 -c 'import json,sys; r=json.load(sys.stdin)["result"]; print(r[0]["id"] if r else "")'
+  local zone="$BASE_DOMAIN" id
+  while [[ "$zone" == *.* ]]; do
+    id="$(cf_api GET "/zones?name=$zone" |
+      python3 -c 'import json,sys; r=json.load(sys.stdin)["result"]; print(r[0]["id"] if r else "")')"
+    if [[ -n "$id" ]]; then printf '%s' "$id"; return; fi
+    zone="${zone#*.}"
+  done
 }
 
 cf_record_id() {
