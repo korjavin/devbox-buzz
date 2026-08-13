@@ -1,0 +1,3 @@
+# A local .env here would be copied to the box verbatim and clobber the one
+# ansible/roles/buzz renders. Never commit one; /opt/buzz/.env is the real file.
+.env

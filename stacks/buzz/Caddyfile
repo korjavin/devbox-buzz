@@ -1,0 +1,12 @@
+# Vendored from block/buzz deploy/compose/Caddyfile
+# @ 0571f5455b1b2aeea7334082f0df9d1f19b22f7d. Only addition: the global block
+# giving Let's Encrypt an account e-mail (ACME_EMAIL, set by the ansible role).
+{
+  email {$ACME_EMAIL}
+}
+
+{$BUZZ_DOMAIN} {
+  encode zstd gzip
+
+  reverse_proxy relay:3000
+}
