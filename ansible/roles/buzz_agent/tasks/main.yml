@@ -1,0 +1,178 @@
+---
+- name: Fail early on missing agent credentials
+  assert:
+    that:
+      - claude_code_oauth_token | length > 0
+      - buzz_relay_owner_pubkey | length > 0 or buzz_agent_respond_to in ['anyone', 'nobody']
+    fail_msg: >-
+      buzz_agent needs claude_code_oauth_token (from `claude setup-token`), and
+      buzz_relay_owner_pubkey unless buzz_agent_respond_to is anyone/nobody —
+      buzz-acp's owner-only gate drops every event while the owner is unknown.
+    quiet: yes
+
+- name: Create the agent's config, workspace and lib directories
+  file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: "{{ item.mode }}"
+  loop:
+    # 0700: holds the agent's Nostr secret key and the harness environment.
+    - { path: "{{ buzz_agent_config_dir }}", mode: '0700' }
+    - { path: "{{ buzz_agent_workspace }}", mode: '0755' }
+    - { path: "{{ devbox_user_home }}/.local/lib/sprig", mode: '0755' }
+
+# sprig is a multicall binary: one static musl ELF that becomes buzz-acp, the
+# `buzz` CLI, etc. depending on argv[0]. The .sha256 asset is fetched by
+# get_url and enforced on every run, which is what keeps the rolling
+# `sprig-latest` release honest.
+- name: Download the sprig release tarball (buzz-acp + buzz CLI)
+  get_url:
+    url: "https://github.com/block/buzz/releases/download/{{ buzz_agent_sprig_release }}/{{ buzz_agent_sprig_asset }}"
+    dest: "{{ devbox_user_home }}/.local/lib/sprig/{{ buzz_agent_sprig_asset }}"
+    checksum: "sha256:https://github.com/block/buzz/releases/download/{{ buzz_agent_sprig_release }}/{{ buzz_agent_sprig_asset }}.sha256"
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: '0644'
+  register: sprig_tarball
+
+- name: Unpack sprig
+  unarchive:
+    src: "{{ devbox_user_home }}/.local/lib/sprig/{{ buzz_agent_sprig_asset }}"
+    dest: "{{ devbox_user_home }}/.local/lib/sprig"
+    remote_src: yes
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+  when: sprig_tarball.changed
+  notify: Restart buzz agent
+
+# ~/.local/bin is on PATH for login shells (roles/devtools). `buzz` has to be
+# there too: the base prompt tells the agent to reply with the buzz CLI.
+- name: Expose the sprig personalities the agent needs on PATH
+  file:
+    src: "{{ devbox_user_home }}/.local/lib/sprig/sprig"
+    dest: "{{ devbox_user_home }}/.local/bin/{{ item }}"
+    state: link
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+  loop:
+    - buzz-acp
+    - buzz
+  notify: Restart buzz agent
+
+# The ACP adapter buzz-acp spawns. Claude Code itself comes from roles/devtools.
+- name: Install the Claude ACP adapter
+  npm:
+    name: "@agentclientprotocol/claude-agent-acp"
+    global: yes
+    state: latest
+  become_user: "{{ devbox_user }}"
+  notify: Restart buzz agent
+
+# --- relay identity + admission ------------------------------------------
+# Both steps below run buzz-admin, which ships inside the relay image
+# (/usr/local/bin/buzz-admin) and needs the relay's DATABASE_URL, REDIS_URL and
+# BUZZ_RELAY_PRIVATE_KEY — so it is run inside the relay container, exactly as
+# upstream's deploy/compose/run.sh does.
+- name: Locate the running relay container
+  command: >-
+    docker ps -q
+    --filter label=com.docker.compose.project={{ buzz_compose_project }}
+    --filter label=com.docker.compose.service={{ buzz_relay_compose_service }}
+  register: relay_container
+  changed_when: false
+
+- name: Require the relay to be up
+  assert:
+    that: relay_container.stdout | length > 0
+    fail_msg: >-
+      No running relay container for compose project
+      '{{ buzz_compose_project }}' service '{{ buzz_relay_compose_service }}'.
+      The buzz stack must be up before this role: buzz-admin (keygen and
+      membership) only exists inside the relay image.
+    quiet: yes
+
+- name: Check for an existing agent keypair
+  stat:
+    path: "{{ buzz_agent_config_dir }}/secret_key"
+  register: agent_secret_key
+
+# Settle, don't regenerate: a new keypair would be a new identity, losing the
+# agent's relay membership, DMs and history.
+- name: Generate the agent's Nostr keypair
+  command: docker exec {{ relay_container.stdout }} buzz-admin generate-key
+  register: generated_key
+  when: not agent_secret_key.stat.exists
+  no_log: yes
+
+- name: Persist the agent's Nostr keypair
+  copy:
+    content: "{{ generated_key.stdout_lines | select('search', item.match) | first | split | last }}"
+    dest: "{{ buzz_agent_config_dir }}/{{ item.name }}"
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { name: 'public_key', match: '^Public key', mode: '0644' }
+    - { name: 'secret_key', match: '^Secret key', mode: '0600' }
+  loop_control:
+    label: "{{ item.name }}"
+  when: not agent_secret_key.stat.exists
+  no_log: yes
+  notify: Restart buzz agent
+
+- name: Read back the agent's keys
+  slurp:
+    src: "{{ buzz_agent_config_dir }}/{{ item }}"
+  register: agent_keys
+  loop:
+    - public_key
+    - secret_key
+  no_log: yes
+
+- name: Bind the agent's keys for the tasks below
+  set_fact:
+    buzz_agent_pubkey: "{{ (agent_keys.results | selectattr('item', 'equalto', 'public_key') | first).content | b64decode | trim }}"
+    buzz_agent_privkey: "{{ (agent_keys.results | selectattr('item', 'equalto', 'secret_key') | first).content | b64decode | trim }}"
+  no_log: yes
+
+# Closed relay (BUZZ_REQUIRE_RELAY_MEMBERSHIP): only pubkeys in the
+# relay_members table may connect. RELAY_OWNER_PUBKEY is seeded at relay
+# startup; every other pubkey — including this agent — is admitted with
+# buzz-admin add-member, which writes the row and publishes the kind:13534
+# NIP-43 roster. Idempotent: a second run prints "already a member".
+- name: Admit the agent's pubkey to the closed relay
+  command: >-
+    docker exec {{ relay_container.stdout }} buzz-admin add-member
+    --pubkey {{ buzz_agent_pubkey }}
+    --role {{ buzz_agent_relay_role }}
+  register: add_member
+  changed_when: "'added' in add_member.stdout"
+
+# --- service ---------------------------------------------------------------
+- name: Install the harness environment file
+  template:
+    src: buzz-agent.env.j2
+    dest: "{{ buzz_agent_config_dir }}/env"
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: '0600'
+  no_log: yes
+  notify: Restart buzz agent
+
+- name: Install the buzz-agent systemd unit
+  template:
+    src: buzz-agent.service.j2
+    dest: "/etc/systemd/system/{{ buzz_agent_service_name }}.service"
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart buzz agent
+
+- name: Enable and start the buzz agent
+  systemd:
+    name: "{{ buzz_agent_service_name }}"
+    enabled: yes
+    state: started
+    daemon_reload: yes
