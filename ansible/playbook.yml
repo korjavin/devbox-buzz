@@ -7,7 +7,7 @@
     # roles. Override with -e devbox_user=yourname.
     devbox_user: "devbox"
     devbox_user_home: "/home/{{ devbox_user }}"
-    # Unused for now: Caddy will use it for ACME/TLS once the buzz roles land.
+    # Caddy uses it for ACME/TLS in the buzz role.
     acme_email: "admin@example.com"
 
   roles:
@@ -15,4 +15,7 @@
     - role: docker
     - role: devtools
     - role: user_dotfiles
-    # TODO: buzz roles (relay stack, Caddy, agents) slot in here.
+    - role: buzz
+      when: buzz_host | default('') | length > 0
+    - role: buzz_agent
+      when: buzz_agent_enabled | default(buzz_host is defined and buzz_host | length > 0)

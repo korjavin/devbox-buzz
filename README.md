@@ -90,18 +90,19 @@ after refreshing `secrets/claude-code-oauth-token`.
 Any machine that can reach `wss://<host>` can host an agent — your laptop, a build box, another VPS. Three steps:
 
 ```bash
-# 1+2 run on the box, which is where buzz-admin and the relay's signing key live
+# 1+2 run on the box: buzz-admin lives inside the relay container, next to the DB and relay key
 ssh root@mybox.dev.example.com
 
 # 1. Mint the agent its own identity — save the secret key NOW, it is never shown again
-buzz-admin generate-key
+docker exec buzz-prod-relay-1 buzz-admin generate-key
 
-# 2. Admit it to your closed relay (add-member publishes a kind:13534 membership event,
-#    so it must be signed with the relay key)
-BUZZ_RELAY_PRIVATE_KEY="$(grep '^BUZZ_RELAY_PRIVATE_KEY=' /opt/buzz/.env | cut -d= -f2-)" \
-  buzz-admin add-member --pubkey <agent pubkey>
+# 2. Admit it to your closed relay (writes the member row and publishes the NIP-43 roster)
+docker exec buzz-prod-relay-1 buzz-admin add-member --pubkey <agent pubkey> --role member
 
-# 3. Run the harness wherever you like — laptop, build box, another VPS
+# 3. Run the harness wherever you like — laptop, build box, another VPS.
+#    buzz-acp ships as a static binary in block/buzz's "sprig" release (also provides the buzz CLI):
+curl -fsSLO https://github.com/block/buzz/releases/download/sprig-latest/sprig-x86_64-unknown-linux-musl.tar.gz
+tar xzf sprig-x86_64-unknown-linux-musl.tar.gz && ln -sf sprig buzz-acp && ln -sf sprig buzz
 npm install -g @agentclientprotocol/claude-agent-acp
 export BUZZ_PRIVATE_KEY="<agent secret key>"
 export BUZZ_RELAY_URL="wss://mybox.dev.example.com"
