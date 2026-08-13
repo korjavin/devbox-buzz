@@ -20,7 +20,11 @@ buzz_relay_owner_pubkey: "{{ buzz_owner_pubkey | default('') }}"
 # Loopback: the relay publishes its HTTP port on 127.0.0.1, so no TLS hop
 # on-box. ws:// is right for both consumers — buzz-acp speaks the websocket,
 # and the `buzz` CLI rewrites ws->http internally (buzz-cli/src/client.rs).
-buzz_relay_url: "ws://127.0.0.1:{{ buzz_http_port | default(3000) }}"
+# The relay resolves its community from the Host header (derived from the
+# relay's own BUZZ_RELAY_URL, port-sensitive), so the agent must connect with
+# the public hostname — a loopback URL 404s. An /etc/hosts entry (tasks) keeps
+# the connection on-box; the cert must be production LE (rustls webpki roots).
+buzz_relay_url: "wss://{{ buzz_host }}"
 
 # How the relay container is found for the buzz-admin calls (keygen +
 # add-member). Compose labels rather than a container name: upstream's bundle

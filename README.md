@@ -48,9 +48,10 @@ bin/devbox list            # boxes this state directory knows about
 
 `up` is idempotent — re-run it to converge. State is one terraform workspace per box.
 
-**Certificates default to Let's Encrypt staging**, because production issues only 5 certs per week per hostname
-and every rebuild burns one. Pass `--production` for a box you actually keep; `check` only verifies TLS strictly
-when you do.
+**Certificates are always production Let's Encrypt.** Staging is not an option: the buzz-acp agent binary ships
+rustls with compiled-in webpki roots and rejects staging certs (`UnknownIssuer`), ignoring the system trust store.
+Production issues only 5 duplicate certs per week per hostname and every rebuild burns one — when iterating on
+rebuilds, **vary the box name** instead of re-upping the same one all day.
 
 **3. Connect:** install the [Buzz desktop app](https://github.com/block/buzz/releases/latest), point it at
 `wss://mybox.dev.example.com`, and sign in with your owner key (`kv get secrets/buzz-owner-nsec-hex`; if the app
@@ -149,8 +150,8 @@ ansible/roles/        system, docker, devtools, user_dotfiles, buzz, buzz_agent
 stacks/buzz/          vendored upstream compose bundle (relay, Postgres, Redis, MinIO, Caddy)
 ```
 
-`bin/devbox` passes these into ansible: `devbox_user`, `acme_email`, `acme_caserver` (staging vs production),
-`buzz_host`, `buzz_owner_pubkey`, `claude_code_oauth_token`.
+`bin/devbox` passes these into ansible: `devbox_user`, `acme_email`, `buzz_host`, `buzz_owner_pubkey`,
+`claude_code_oauth_token`.
 
 **Backups.** Three things are not recreatable:
 

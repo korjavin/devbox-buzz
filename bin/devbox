@@ -47,17 +47,17 @@ SERVER_TYPE="${DEVBOX_SERVER_TYPE:-cx33}"
 LOCATION="${DEVBOX_LOCATION:-nbg1}"
 KEY="$HOME/.ssh/${NAME}_ed25519"
 
-# Production Let's Encrypt issues 5 certs per week for the same hostname, and
-# each rebuild of a name burns one. Boxes that churn must default to staging or
-# the fourth rebuild of the day starts serving untrusted certs.
-ACME_CASERVER="https://acme-staging-v02.api.letsencrypt.org/directory"
-# Staging certs are untrusted by design, so the health checks cannot verify
-# them. Only --production gets a strict TLS check.
-CURL=(curl -s -k)
+# Certificates are ALWAYS production Let's Encrypt. Staging is not an option
+# here: the buzz-acp agent binary ships rustls with compiled-in webpki roots
+# (verified 2026-08-13: it rejects staging certs with UnknownIssuer and ignores
+# both the system trust store and SSL_CERT_FILE), so an agent cannot connect to
+# a staging-cert relay. Production issues only 5 duplicate certs per week per
+# hostname and every rebuild burns one — when iterating on rebuilds, vary the
+# box NAME instead of re-upping the same one all day.
+CURL=(curl -s)
 for arg in "$@"; do
   if [[ "$arg" == "--production" ]]; then
-    ACME_CASERVER="https://acme-v02.api.letsencrypt.org/directory"
-    CURL=(curl -s)
+    info "--production is now the only mode; flag ignored"
   fi
 done
 
@@ -221,7 +221,6 @@ cmd_up() {
   ansible-playbook -i "$inv" "$ANSIBLE_DIR/playbook.yml" \
     -e devbox_user=devbox \
     -e "acme_email=$acme_email" \
-    -e "acme_caserver=$ACME_CASERVER" \
     -e "buzz_host=$BUZZ_HOST" \
     -e "buzz_owner_pubkey=$owner_pubkey" \
     "${agent_args[@]}" \

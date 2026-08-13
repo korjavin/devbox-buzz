@@ -10,6 +10,15 @@
       buzz-acp's owner-only gate drops every event while the owner is unknown.
     quiet: yes
 
+# The agent connects with the public hostname (community routing is Host-based)
+# but should never depend on external DNS or hairpin NAT: pin the name to
+# loopback, where Caddy terminates TLS and proxies to the relay.
+- name: Pin {{ buzz_host }} to loopback for the on-box agent
+  lineinfile:
+    path: /etc/hosts
+    line: "127.0.0.1 {{ buzz_host }}"
+    regexp: '\s{{ buzz_host | regex_escape }}$'
+
 - name: Create the agent's config, workspace and lib directories
   file:
     path: "{{ item.path }}"
