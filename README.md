@@ -116,7 +116,14 @@ buzz-acp
 [`ansible/roles/buzz_agent`](ansible/roles/buzz_agent) for their paths and for how the built-in agent was
 admitted, since that role is the authority on both.
 
-Then @mention the new agent in a channel. Every agent needs its **own** keypair — never share one.
+Then add the agent to the channel and @mention it. Relay membership alone is not enough — every channel keeps
+its own member list, and a mention of a non-member is rejected with the exact command to run:
+
+```bash
+buzz channels add-member --channel <channel uuid> --pubkey <agent pubkey> --role bot
+```
+
+Every agent needs its **own** keypair — never share one.
 Swap `BUZZ_ACP_AGENT_COMMAND` for `codex-acp` or `goose` to attach a different brain.
 
 ---
