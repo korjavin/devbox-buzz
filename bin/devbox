@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+# One-command lifecycle for a buzzbox: terraform (server + firewall) + DNS,
+# then ansible (toolchain, buzz relay, Claude agent).
+#
+#   devbox up <name>       create/converge, then verify
+#   devbox down <name>     destroy the server AND its DNS record
+#   devbox check <name>    verify an existing box
+#   devbox list            boxes this state directory knows about
+#
+# Every credential comes from stash on THIS machine (see `kv`); nothing is
+# stashed on the box. State is one terraform workspace per box, so boxes never
+# clobber each other.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TF_DIR="$REPO/terraform"
+ANSIBLE_DIR="$REPO/ansible"
+
+# Terraform reads credentials from the environment; nothing lands in a tfvars
+# file, so nothing can be committed by accident.
+export TF_IN_AUTOMATION=1
+
+die() { echo "error: $*" >&2; exit 1; }
+info() { echo "==> $*"; }
+
+need() { command -v "$1" >/dev/null || die "$1 not found in PATH"; }
+need terraform; need ansible-playbook; need kv; need ssh-keygen; need openssl
+
+# kv exits 0 with empty output for a missing key, so treat empty as missing.
+stash_get() { kv get "$1" 2>/dev/null || true; }
+
+stash_get_or_die() {
+  local v; v="$(stash_get "$1")"
+  [[ -n "$v" ]] || die "stash key '$1' is empty or missing. ${2:-}"
+  printf '%s' "$v"
+}
+
+usage() { sed -n '2,12p' "$0" | sed 's/^# \?//'; exit "${1:-1}"; }
+
+CMD="${1:-}"; NAME="${2:-}"
+[[ -n "$CMD" ]] || usage 0
+[[ "$CMD" == "list" || -n "$NAME" ]] || usage
+
+# ── shared config ────────────────────────────────────────────────
+PROVIDER="${DEVBOX_PROVIDER:-hetzner}"           # hetzner | digitalocean
+SERVER_TYPE="${DEVBOX_SERVER_TYPE:-cx33}"
+LOCATION="${DEVBOX_LOCATION:-nbg1}"
+KEY="$HOME/.ssh/${NAME}_ed25519"
+
+# Production Let's Encrypt issues 5 certs per week for the same hostname, and
+# each rebuild of a name burns one. Boxes that churn must default to staging or
+# the fourth rebuild of the day starts serving untrusted certs.
+ACME_CASERVER="https://acme-staging-v02.api.letsencrypt.org/directory"
+# Staging certs are untrusted by design, so the health checks cannot verify
+# them. Only --production gets a strict TLS check.
+CURL=(curl -s -k)
+for arg in "$@"; do
+  if [[ "$arg" == "--production" ]]; then
+    ACME_CASERVER="https://acme-v02.api.letsencrypt.org/directory"
+    CURL=(curl -s)
+  fi
+done
+
+tf() { terraform -chdir="$TF_DIR" "$@"; }
+
+# ── owner identity ───────────────────────────────────────────────
+# The relay is closed: only the owner pubkey (and whoever the owner admits) may
+# read or publish. That pubkey is YOUR identity, not the box's, so it is
+# generated once here and reused by every box forever. Losing the private half
+# means losing every workspace it owns -- back up secrets/buzz-owner-nsec-hex.
+#
+# Nostr pubkeys are x-only: the 32-byte X coordinate. openssl emits a
+# compressed point (33 bytes = 02|03 parity prefix + X), so the last 64 hex
+# chars are exactly the pubkey.
+buzz_owner_pubkey() {
+  local pubkey pem priv
+  pubkey="$(stash_get secrets/buzz-owner-pubkey)"
+  if [[ -n "$pubkey" ]]; then
+    [[ "$pubkey" =~ ^[0-9a-f]{64}$ ]] ||
+      die "secrets/buzz-owner-pubkey is not 64 lowercase hex chars: '$pubkey'"
+    printf '%s' "$pubkey"; return
+  fi
+
+  pem="$(openssl ecparam -genkey -name secp256k1 -noout)"
+  pubkey="$(printf '%s\n' "$pem" |
+    openssl ec -pubout -conv_form compressed -outform DER 2>/dev/null |
+    od -An -tx1 | tr -cd '0-9a-f')"
+  pubkey="${pubkey: -64}"
+  priv="$(printf '%s\n' "$pem" | openssl ec -text -noout 2>/dev/null |
+    awk '/priv:/{f=1;next} /pub:/{f=0} f' | tr -cd '0-9a-f')"
+  priv="${priv: -64}"
+  [[ "$pubkey" =~ ^[0-9a-f]{64}$ && "$priv" =~ ^[0-9a-f]{64}$ ]] ||
+    die "openssl produced a malformed secp256k1 keypair"
+
+  kv set secrets/buzz-owner-nsec-hex "$priv" >/dev/null
+  kv set secrets/buzz-owner-pubkey "$pubkey" >/dev/null
+  # stderr: this function's stdout is the pubkey and gets captured.
+  info "generated your buzz owner keypair -> stash secrets/buzz-owner-{pubkey,nsec-hex}" >&2
+  info "BACK IT UP: the private half is the only way back into your relays" >&2
+  printf '%s' "$pubkey"
+}
+
+# ── Cloudflare DNS ───────────────────────────────────────────────
+# Deliberately not a terraform resource: the cloudflare provider demands
+# credentials at configure time even when zero DNS resources are in the plan,
+# which breaks every apply for anyone not using Cloudflare. `down` deletes what
+# `up` created, so the lifecycle is coupled either way.
+cf_api() {
+  local method="$1" path="$2" body="${3:-}"
+  curl -s -X "$method" -H "Authorization: Bearer $CF_TOKEN" \
+    -H "Content-Type: application/json" \
+    ${body:+-d "$body"} "https://api.cloudflare.com/client/v4$path"
+}
+
+cf_zone_id() {
+  local zone="${BASE_DOMAIN#*.}"   # dev.example.com -> example.com
+  cf_api GET "/zones?name=$zone" |
+    python3 -c 'import json,sys; r=json.load(sys.stdin)["result"]; print(r[0]["id"] if r else "")'
+}
+
+cf_record_id() {
+  cf_api GET "/zones/$1/dns_records?type=A&name=$2" |
+    python3 -c 'import json,sys; r=json.load(sys.stdin)["result"]; print(r[0]["id"] if r else "")'
+}
+
+cf_upsert() { # fqdn, ip
+  local zid rid body
+  zid="$(cf_zone_id)"; [[ -n "$zid" ]] || die "cloudflare zone for $BASE_DOMAIN not found"
+  # proxied=false is required: Caddy answers the ACME challenge itself, and an
+  # orange-cloud record terminates TLS at Cloudflare instead -- which also
+  # breaks the relay's websockets.
+  body="$(printf '{"type":"A","name":"%s","content":"%s","ttl":120,"proxied":false}' "$1" "$2")"
+  rid="$(cf_record_id "$zid" "$1")"
+  if [[ -n "$rid" ]]; then cf_api PUT "/zones/$zid/dns_records/$rid" "$body" >/dev/null
+  else cf_api POST "/zones/$zid/dns_records" "$body" >/dev/null; fi
+  info "dns $1 -> $2"
+}
+
+cf_delete() { # fqdn
+  local zid rid
+  zid="$(cf_zone_id)"; [[ -n "$zid" ]] || return 0
+  rid="$(cf_record_id "$zid" "$1")"
+  [[ -n "$rid" ]] || return 0
+  cf_api DELETE "/zones/$zid/dns_records/$rid" >/dev/null
+  info "dns $1 removed"
+}
+
+tf_workspace() {
+  tf init -input=false >/dev/null
+  tf workspace select "$NAME" 2>/dev/null || tf workspace new "$NAME"
+}
+
+load_config() {
+  BASE_DOMAIN="$(stash_get_or_die secrets/devbox-base-domain)"
+  CF_TOKEN="$(stash_get_or_die secrets/cf-dns-token)"
+  BUZZ_HOST="$NAME.$BASE_DOMAIN"
+  case "$PROVIDER" in
+    hetzner)      export TF_VAR_hcloud_token; TF_VAR_hcloud_token="$(stash_get_or_die secrets/hcloud-token)" ;;
+    digitalocean) export TF_VAR_digitalocean_token; TF_VAR_digitalocean_token="$(stash_get_or_die secrets/do-token)" ;;
+    *) die "DEVBOX_PROVIDER must be 'hetzner' or 'digitalocean', got '$PROVIDER'" ;;
+  esac
+}
+
+cmd_up() {
+  local acme_email owner_pubkey oauth_token ip i n inv
+  local agent_args=()
+  load_config
+  acme_email="$(stash_get_or_die secrets/acme-email)"
+  owner_pubkey="$(buzz_owner_pubkey)"
+  # No token = no built-in agent. The relay is still yours to talk to, and the
+  # buzz_agent role skips itself.
+  oauth_token="$(stash_get secrets/claude-code-oauth-token)"
+  if [[ -n "$oauth_token" ]]; then
+    agent_args=(-e "claude_code_oauth_token=$oauth_token")
+  else
+    info "no secrets/claude-code-oauth-token stashed -- deploying the relay without the built-in agent"
+  fi
+
+  [[ -f "$KEY" ]] || { info "generating $KEY"; ssh-keygen -t ed25519 -f "$KEY" -N "" -C "$NAME" -q; }
+
+  info "terraform: server + firewall for $NAME ($PROVIDER)"
+  tf_workspace
+  tf apply -auto-approve -input=false \
+    -var "provider_choice=$PROVIDER" \
+    -var "server_name=$NAME" \
+    -var "server_type=$SERVER_TYPE" \
+    -var "location=$LOCATION" \
+    -var "ssh_public_key=$(cat "$KEY.pub")" >/dev/null
+
+  ip="$(tf output -raw server_ip)"
+  info "server_ip=$ip"
+
+  cf_upsert "$BUZZ_HOST" "$ip"
+
+  # Hetzner recycles IPs aggressively, so a rebuild frequently lands on an
+  # address whose old host key is still in known_hosts -- ssh then refuses the
+  # connection and ansible reports UNREACHABLE. Purge by IP and by name, here
+  # rather than in `down`, so boxes destroyed by other means are covered too.
+  for n in "$ip" "$BUZZ_HOST"; do
+    ssh-keygen -R "$n" >/dev/null 2>&1 || true
+  done
+
+  info "waiting for ssh"
+  for i in $(seq 1 30); do
+    ssh -i "$KEY" -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=10 \
+      "root@$ip" 'cloud-init status --wait >/dev/null 2>&1 || true' 2>/dev/null && break
+    sleep 10
+  done
+
+  inv="$(mktemp)"; trap 'rm -f "$inv"' RETURN
+  printf '[devbox]\n%s ansible_host=%s ansible_user=root ansible_ssh_private_key_file=%s\n' \
+    "$NAME" "$ip" "$KEY" > "$inv"
+
+  info "ansible: toolchain, buzz relay, Claude agent"
+  ansible-playbook -i "$inv" "$ANSIBLE_DIR/playbook.yml" \
+    -e devbox_user=devbox \
+    -e "acme_email=$acme_email" \
+    -e "acme_caserver=$ACME_CASERVER" \
+    -e "buzz_host=$BUZZ_HOST" \
+    -e "buzz_owner_pubkey=$owner_pubkey" \
+    "${agent_args[@]}" \
+    -e nvim_repo=https://github.com/korjavin/nvim-dotfiles.git \
+    -e claude_skills_repo=https://github.com/korjavin/claude-common-skills.git
+
+  cmd_check
+}
+
+cmd_down() {
+  load_config
+  tf_workspace
+  info "destroying $NAME (server + firewall + DNS)"
+  tf destroy -auto-approve -input=false \
+    -var "provider_choice=$PROVIDER" \
+    -var "server_name=$NAME" \
+    -var "ssh_public_key=$(cat "$KEY.pub" 2>/dev/null || echo 'ssh-ed25519 AAAA placeholder')"
+
+  cf_delete "$BUZZ_HOST"
+
+  # The workspace itself must go too, or `list` keeps showing dead boxes.
+  tf workspace select default >/dev/null
+  tf workspace delete "$NAME" >/dev/null
+  ssh-keygen -R "$BUZZ_HOST" >/dev/null 2>&1 || true
+  info "destroyed. Your owner keypair is untouched, so a rebuild is still yours."
+  info "NOTE: relay history/media lived on that server's volumes and is gone."
+}
+
+cmd_check() {
+  local ip fail=0 unit
+  load_config
+  tf_workspace
+  ip="$(tf output -raw server_ip 2>/dev/null || true)"
+  [[ -n "$ip" ]] || die "no state for '$NAME' -- has it been created?"
+
+  check_one() { # label, actual, expected
+    if [[ "$2" == "$3" ]]; then printf '  ok    %-22s %s\n' "$1" "$2"
+    else printf '  FAIL  %-22s %s (want %s)\n' "$1" "$2" "$3"; fail=1; fi
+  }
+
+  echo "checking $NAME ($ip)"
+  # /_liveness is the relay's own liveness route, proxied by Caddy: a 200 over
+  # https proves DNS, the certificate, Caddy and the relay process all at once.
+  check_one "relay liveness" \
+    "$("${CURL[@]}" -o /dev/null -w '%{http_code}' -m 30 "https://$BUZZ_HOST/_liveness" || echo 000)" "200"
+
+  if [[ -n "$(stash_get secrets/claude-code-oauth-token)" ]]; then
+    unit="$(ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=10 "root@$ip" \
+      'systemctl is-active buzz-agent' 2>/dev/null || echo unreachable)"
+    check_one "buzz-agent unit" "$unit" "active"
+  fi
+
+  [[ $fail -eq 0 ]] || die "checks failed for $NAME"
+  info "$NAME is healthy: wss://$BUZZ_HOST"
+}
+
+cmd_list() {
+  tf init -input=false >/dev/null
+  tf workspace list | sed 's/^/  /'
+}
+
+case "$CMD" in
+  up)    cmd_up ;;
+  down)  cmd_down ;;
+  check) cmd_check ;;
+  list)  cmd_list ;;
+  *)     usage ;;
+esac
