@@ -1,0 +1,6 @@
+---
+- name: Restart buzz agent
+  systemd:
+    name: "{{ buzz_agent_service_name }}"
+    state: restarted
+    daemon_reload: yes

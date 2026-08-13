@@ -1,0 +1,53 @@
+---
+# Claude Code attached to the local buzz relay through the buzz-acp harness.
+# See README.md in this role for the moving parts and the relay-admission flow.
+
+# --- required, no sane default -------------------------------------------
+# Claude Code OAuth token (`claude setup-token`). There is no ANTHROPIC_API_KEY
+# in this deployment; claude-agent-acp runs on the Claude Agent SDK, which
+# treats CLAUDE_CODE_OAUTH_TOKEN as a first-class credential. Lands ONLY in the
+# 0600 EnvironmentFile. Pass with -e or a vault.
+claude_code_oauth_token: ""
+
+# The relay owner's Nostr pubkey (64-char hex) — same key as RELAY_OWNER_PUBKEY
+# in the relay stack. buzz-acp's default author gate is `owner-only`, and an
+# agent with no owner answers nobody, so this is required unless you move
+# buzz_agent_respond_to off owner-only. Defaults to the relay role's own var so
+# the two stay in step without the playbook repeating itself.
+buzz_relay_owner_pubkey: "{{ buzz_owner_pubkey | default('') }}"
+
+# --- relay ---------------------------------------------------------------
+# Loopback: the relay publishes its HTTP port on 127.0.0.1, so no TLS hop
+# on-box. ws:// is right for both consumers — buzz-acp speaks the websocket,
+# and the `buzz` CLI rewrites ws->http internally (buzz-cli/src/client.rs).
+buzz_relay_url: "ws://127.0.0.1:{{ buzz_http_port | default(3000) }}"
+
+# How the relay container is found for the buzz-admin calls (keygen +
+# add-member). Compose labels rather than a container name: upstream's bundle
+# sets `name: buzz-prod` and no container_name, so the name is generated.
+buzz_compose_project: "buzz-prod"
+buzz_relay_compose_service: "relay"
+
+# --- sprig (ships buzz-acp + the buzz CLI) -------------------------------
+# buzz-acp has no crates.io/npm/apt distribution and is not in the relay image.
+# Upstream ships it in the `sprig` multicall binary: one static musl ELF whose
+# personality is chosen by argv[0] (buzz-acp, buzz-agent, buzz-dev-mcp, buzz).
+# `sprig-latest` is a rolling release tracking main; pin it to a `sprig-v*` tag
+# for reproducibility. Integrity comes from the sibling .sha256 asset, which
+# get_url fetches and enforces on every run.
+buzz_agent_sprig_release: "sprig-latest"
+buzz_agent_sprig_asset: "sprig-x86_64-unknown-linux-musl.tar.gz"
+
+# --- harness behaviour ---------------------------------------------------
+# owner-only | allowlist | anyone | nobody
+buzz_agent_respond_to: "owner-only"
+# Extra pubkeys (comma-separated 64-char hex) for allowlist mode. Owner is
+# always implicitly included.
+buzz_agent_respond_to_allowlist: ""
+# Relay role for the agent's pubkey: member or admin (owner is not settable).
+buzz_agent_relay_role: "member"
+
+buzz_agent_service_name: "buzz-agent"
+buzz_agent_config_dir: "{{ devbox_user_home }}/.config/buzz-agent"
+# Where the Claude agent does its work — its cwd, and what it can see.
+buzz_agent_workspace: "{{ devbox_user_home }}/buzz-workspace"
