@@ -1,0 +1,105 @@
+---
+# Deploys the vendored buzz relay stack (stacks/buzz) to {{ buzz_dir }}.
+# Must survive a re-run against a live box without rotating anything: the
+# .env secrets are settled, not regenerated. See "Settle the stack secrets".
+
+- name: Fail early on a half-configured buzz relay
+  assert:
+    that:
+      - buzz_host | length > 0
+      - buzz_owner_pubkey is match('[0-9a-fA-F]{64}$')
+      - acme_email | length > 0
+    fail_msg: >-
+      The buzz role needs buzz_host (public DNS name pointing at this box),
+      buzz_owner_pubkey (the OWNER's stable personal Nostr pubkey, 64 hex
+      chars -- it is never generated here, a fresh one would lock the owner
+      out of their own closed relay) and acme_email (Let's Encrypt account).
+
+- name: Ensure the buzz stack directory exists
+  file:
+    path: "{{ buzz_dir }}"
+    state: directory
+    mode: '0700'
+
+- name: Check whether the stack .env already exists
+  stat:
+    path: "{{ buzz_dir }}/.env"
+  register: _buzz_env_stat
+
+- name: Read the existing stack .env
+  slurp:
+    src: "{{ buzz_dir }}/.env"
+  register: _buzz_env_slurp
+  when: _buzz_env_stat.stat.exists
+
+# Every one of these is reused rather than regenerated on a re-run, because
+# each is bound to state that outlives the container:
+#   POSTGRES_PASSWORD  - Postgres only applies it on FIRST init, so a fresh
+#                        value against a surviving buzz-postgres-data volume
+#                        locks the relay out of its own database.
+#   BUZZ_S3_*          - same for MinIO's root credentials vs buzz-minio-data.
+#   REDIS_PASSWORD     - rotating it strands the running relay's connections.
+#   BUZZ_RELAY_PRIVATE_KEY - the relay's Nostr identity. Rotating it changes
+#                        the relay pubkey, invalidating every published
+#                        addressable event and every client's trust in it.
+#   BUZZ_GIT_HOOK_HMAC_SECRET - installed git hooks keep signing with the old one.
+# Hex-charset secrets use digits+abcdef so they come out lowercase hex;
+# BUZZ_RELAY_PRIVATE_KEY is a secp256k1 key, which nostr::Keys::parse() reads
+# as 32 bytes of hex (nsec bech32 also works, hex is what upstream documents).
+- name: Settle the stack secrets
+  set_fact:
+    _buzz_secrets: >-
+      {{ _buzz_secrets | default({}) | combine({item.key: (_found if _found else _generated)}) }}
+  vars:
+    _env_text: "{{ _buzz_env_slurp.content | default('') | b64decode }}"
+    _found: "{{ _env_text | regex_search('^' ~ item.key ~ '=(.+)$', '\\1', multiline=True) | default([], true) | join }}"
+    _generated: "{{ lookup('password', '/dev/null length=' ~ item.length ~ ' chars=' ~ item.chars) }}"
+  loop:
+    - { key: BUZZ_RELAY_PRIVATE_KEY, length: 64, chars: 'digits,abcdef' }
+    - { key: BUZZ_GIT_HOOK_HMAC_SECRET, length: 64, chars: 'digits,abcdef' }
+    - { key: POSTGRES_PASSWORD, length: 48, chars: 'ascii_letters,digits' }
+    - { key: REDIS_PASSWORD, length: 48, chars: 'ascii_letters,digits' }
+    - { key: BUZZ_S3_ACCESS_KEY, length: 20, chars: 'ascii_letters,digits' }
+    - { key: BUZZ_S3_SECRET_KEY, length: 48, chars: 'ascii_letters,digits' }
+  no_log: true
+
+# Whole-directory copy with mode: preserve so run.sh keeps its exec bit. Runs
+# before the .env template on purpose: a stray stacks/buzz/.env in someone's
+# checkout would otherwise land on top of the rendered one (hence its .gitignore).
+- name: Copy the vendored buzz compose bundle
+  copy:
+    src: "{{ playbook_dir }}/../stacks/buzz/"
+    dest: "{{ buzz_dir }}/"
+    mode: preserve
+
+- name: Template the buzz stack .env
+  template:
+    src: env.j2
+    dest: "{{ buzz_dir }}/.env"
+    mode: '0600'
+
+# run.sh assembles the compose file list (TLS overlay via BUZZ_COMPOSE_TLS) and
+# runs `up -d --wait`; no point reimplementing that here. Compose recreates the
+# relay by itself when .env or an image pin changed.
+- name: Start the buzz stack with the Caddy TLS overlay
+  command: ./run.sh start
+  args:
+    chdir: "{{ buzz_dir }}"
+  environment:
+    BUZZ_COMPOSE_TLS: "true"
+  register: _buzz_up
+  changed_when: "'Started' in _buzz_up.stderr or 'Created' in _buzz_up.stderr"
+
+# `up --wait` already blocks on the relay's own healthcheck (which probes
+# /_readiness on the in-container health port). This is the check that the
+# loopback publish in compose.caddy.yml actually survived the overlay merge --
+# the host-side agent depends on exactly this URL.
+- name: Wait for the relay liveness endpoint on the host loopback
+  uri:
+    url: "http://127.0.0.1:{{ buzz_http_port }}/_liveness"
+    status_code: 200
+  register: _buzz_liveness
+  until: _buzz_liveness is succeeded
+  retries: "{{ buzz_liveness_retries }}"
+  delay: "{{ buzz_liveness_delay }}"
+  changed_when: false

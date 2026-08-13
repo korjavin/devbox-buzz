@@ -1,0 +1,23 @@
+---
+buzz_dir: /opt/buzz
+
+# Pinned to the image built from the commit stacks/buzz was vendored from
+# (see stacks/buzz/README.md). Never track :main here -- an unattended
+# re-provision would silently pull a different relay.
+buzz_image: ghcr.io/block/buzz:sha-0571f54
+
+# Relay HTTP/WebSocket port. Published on 127.0.0.1 only (Caddy fronts the
+# public side), so a host-side agent can reach ws://127.0.0.1:{{ buzz_http_port }}.
+buzz_http_port: 3000
+
+# Required, no sane default -- the role asserts both.
+# buzz_host: relay.example.com
+# buzz_owner_pubkey: <64-char hex Nostr pubkey of the human owner>
+buzz_host: ""
+buzz_owner_pubkey: ""
+
+# ACME registration address for Caddy. The playbook sets this.
+acme_email: ""
+
+buzz_liveness_retries: 30
+buzz_liveness_delay: 5
