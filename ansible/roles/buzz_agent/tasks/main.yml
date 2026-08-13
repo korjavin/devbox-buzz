@@ -37,6 +37,13 @@
     mode: '0644'
   register: sprig_tarball
 
+- name: Check whether sprig is already unpacked
+  stat:
+    path: "{{ devbox_user_home }}/.local/lib/sprig/sprig"
+  register: sprig_binary
+
+# Also unpacks when the binary is missing but the tarball is current — an
+# interrupted run would otherwise leave dangling symlinks and a dead service.
 - name: Unpack sprig
   unarchive:
     src: "{{ devbox_user_home }}/.local/lib/sprig/{{ buzz_agent_sprig_asset }}"
@@ -44,7 +51,7 @@
     remote_src: yes
     owner: "{{ devbox_user }}"
     group: "{{ devbox_user }}"
-  when: sprig_tarball.changed
+  when: sprig_tarball.changed or not sprig_binary.stat.exists
   notify: Restart buzz agent
 
 # ~/.local/bin is on PATH for login shells (roles/devtools). `buzz` has to be

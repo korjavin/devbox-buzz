@@ -12,14 +12,15 @@ claude_code_oauth_token: ""
 # The relay owner's Nostr pubkey (64-char hex) — same key as RELAY_OWNER_PUBKEY
 # in the relay stack. buzz-acp's default author gate is `owner-only`, and an
 # agent with no owner answers nobody, so this is required unless you move
-# buzz_agent_respond_to off owner-only.
-buzz_relay_owner_pubkey: ""
+# buzz_agent_respond_to off owner-only. Defaults to the relay role's own var so
+# the two stay in step without the playbook repeating itself.
+buzz_relay_owner_pubkey: "{{ buzz_owner_pubkey | default('') }}"
 
 # --- relay ---------------------------------------------------------------
 # Loopback: the relay publishes its HTTP port on 127.0.0.1, so no TLS hop
 # on-box. ws:// is right for both consumers — buzz-acp speaks the websocket,
 # and the `buzz` CLI rewrites ws->http internally (buzz-cli/src/client.rs).
-buzz_relay_url: "ws://127.0.0.1:3000"
+buzz_relay_url: "ws://127.0.0.1:{{ buzz_http_port | default(3000) }}"
 
 # How the relay container is found for the buzz-admin calls (keygen +
 # add-member). Compose labels rather than a container name: upstream's bundle
