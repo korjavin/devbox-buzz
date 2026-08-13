@@ -1,0 +1,11 @@
+provider_choice = "hetzner" # "hetzner" or "digitalocean"
+hcloud_token    = "YOUR_HETZNER_API_TOKEN"
+server_name     = "buzzbox"
+location        = "nbg1"    # Hetzner: nbg1, fsn1, hel1; DO: fra1, nyc1
+server_type     = "cx33"    # Hetzner: cx33 (4c/8G, nbg1 only); DO: s-2vcpu-4gb
+ssh_public_key  = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@devbox"
+
+# Who may reach SSH (port 22). Defaults to open to the whole internet
+# (["0.0.0.0/0", "::/0"]). Narrow it to your own address if you have a stable one:
+# allowed_ssh_cidrs = ["1.2.3.4/32"]
+# Ports 80/443 and the mosh UDP range stay open to the world regardless.

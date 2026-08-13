@@ -4,3 +4,28 @@
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+!terraform.tfvars.example
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Environment files
+.env
+!.env.example
+
+# OS / Editor
+.DS_Store
+*.swp
+*.swo
+
+# Agent worktrees / local session state
+.claude/worktrees/
