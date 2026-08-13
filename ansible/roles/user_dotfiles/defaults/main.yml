@@ -1,0 +1,16 @@
+---
+# Every repo below is empty by default and its clone task is skipped: a
+# stranger running this playbook must not end up executing someone else's
+# dotfiles as their shell config. Point them at your own repos, e.g.
+#
+#   ansible-playbook ... \
+#     -e nvim_repo=https://github.com/korjavin/nvim-dotfiles.git \
+#     -e claude_skills_repo=https://github.com/korjavin/claude-common-skills.git \
+#     -e dotfiles_repo=https://github.com/korjavin/dotfiles.git
+
+# Cloned to ~/.config/nvim.
+nvim_repo: ""
+# Cloned to ~/.claude/claude-common-skills, its skills/ symlinked to ~/.claude/skills.
+claude_skills_repo: ""
+# Cloned over $HOME with yadm.
+dotfiles_repo: ""

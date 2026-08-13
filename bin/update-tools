@@ -1,0 +1,301 @@
+#!/usr/bin/env bash
+#
+# update-tools - Utility script to update development tools:
+#   - npm packages: claude-code, codex, jules, wrangler, pnpm
+#   - CLI tools: agy, cloudflared, uv
+#   - Go binaries: ralphex, revdiff, beads (bd)
+#   - apt packages: go, gh, glab, curl, npm, jq, ripgrep, fzf, htop
+#
+# Everything except the apt target installs into ~/.local and needs no sudo
+# (issue #16). The apt target genuinely needs root and says so.
+
+set -u
+
+# Per-user install prefix. Mirrors what the playbook provisions.
+LOCAL_BIN="${LOCAL_BIN:-$HOME/.local/bin}"
+export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-$HOME/.local}"
+
+# Pinned tool versions - mirrors ansible/roles/devtools/defaults/main.yml so the
+# updater cannot silently drift past the pins the playbook set.
+# bump: update the ansible defaults and these, or export the env var for a one-off.
+BEADS_VERSION="${BEADS_VERSION:-latest}"
+RALPHEX_VERSION="${RALPHEX_VERSION:-latest}"
+REVDIFF_VERSION="${REVDIFF_VERSION:-latest}"
+CLOUDFLARED_VERSION="${CLOUDFLARED_VERSION:-2026.7.3}"
+# sha256 of the cloudflared-linux-amd64 binary for CLOUDFLARED_VERSION. Empty =
+# install unverified (warns). bump: sha256sum the new binary and paste it here.
+CLOUDFLARED_SHA256="${CLOUDFLARED_SHA256:-9d71c677db00134c1bd4144b7783486b654ad281b1ea62b4972098d19f770f17}"
+NPM_PACKAGES="${NPM_PACKAGES:-@anthropic-ai/claude-code@latest @openai/codex@latest @google/jules@latest wrangler@latest pnpm@latest}"
+
+# Colors for terminal output
+BOLD="\033[1m"
+GREEN="\033[1;32m"
+YELLOW="\033[1;33m"
+CYAN="\033[1;36m"
+RED="\033[1;31m"
+RESET="\033[0m"
+
+log_info() {
+    echo -e "${CYAN}[INFO]${RESET} $1"
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${RESET} $1"
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${RESET} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${RESET} $1"
+}
+
+print_header() {
+    echo -e "\n${BOLD}========================================${RESET}"
+    echo -e "${BOLD}   Updating: $1${RESET}"
+    echo -e "${BOLD}========================================${RESET}"
+}
+
+update_npm_tools() {
+    print_header "NPM Global Tools (claude-code, codex, jules, wrangler, pnpm)"
+    log_info "Running npm update for global packages: $NPM_PACKAGES"
+    log_info "Global prefix: ${NPM_CONFIG_PREFIX}"
+    # shellcheck disable=SC2086 # NPM_PACKAGES is a deliberate space-separated list
+    if npm install -g $NPM_PACKAGES; then
+        log_success "NPM tools updated successfully!"
+    else
+        log_error "Failed to update NPM tools."
+        return 1
+    fi
+}
+
+update_uv() {
+    print_header "Python Package Manager (uv)"
+    if command -v uv >/dev/null 2>&1; then
+        log_info "Updating uv self..."
+        uv self update
+        log_success "uv update finished!"
+    else
+        log_warn "uv CLI not found in PATH."
+    fi
+}
+
+update_cloudflared() {
+    print_header "Cloudflare CLI (cloudflared)"
+    log_info "Updating cloudflared to ${CLOUDFLARED_VERSION}..."
+    if [ "$CLOUDFLARED_VERSION" = "latest" ]; then
+        CF_PATH="latest/download"
+    else
+        CF_PATH="download/${CLOUDFLARED_VERSION}"
+    fi
+    # Raw binary, not the .deb: dpkg needs root, ~/.local/bin does not.
+    # Staged inside LOCAL_BIN so the final mv is a same-filesystem rename and
+    # can therefore replace a cloudflared that is currently running.
+    mkdir -p "$LOCAL_BIN" || return 1
+    TMP_BIN=$(mktemp "${LOCAL_BIN}/cloudflared.XXXXXX")
+    if ! curl -fL --output "$TMP_BIN" "https://github.com/cloudflare/cloudflared/releases/${CF_PATH}/cloudflared-linux-amd64"; then
+        log_error "Failed to download cloudflared binary."
+        rm -f "$TMP_BIN"
+        return 1
+    fi
+    if [ -n "$CLOUDFLARED_SHA256" ]; then
+        if ! echo "${CLOUDFLARED_SHA256}  ${TMP_BIN}" | sha256sum -c --status; then
+            log_error "cloudflared checksum mismatch - refusing to install."
+            log_error "Expected ${CLOUDFLARED_SHA256}, got $(sha256sum "$TMP_BIN" | cut -d' ' -f1)"
+            rm -f "$TMP_BIN"
+            return 1
+        fi
+        log_success "cloudflared checksum verified."
+    else
+        log_warn "CLOUDFLARED_SHA256 is empty - installing unverified."
+    fi
+    chmod 755 "$TMP_BIN"
+    mv -f "$TMP_BIN" "${LOCAL_BIN}/cloudflared"
+    log_success "cloudflared updated successfully to ${LOCAL_BIN}/cloudflared"
+}
+
+update_agy() {
+    print_header "Antigravity CLI (agy)"
+    if command -v agy >/dev/null 2>&1; then
+        log_info "Updating agy..."
+        if command -v agy.bin >/dev/null 2>&1; then
+            agy.bin update
+        else
+            agy update
+        fi
+        log_success "agy update finished!"
+    else
+        log_warn "agy CLI not found in PATH."
+    fi
+}
+
+update_ralphex() {
+    print_header "Go Tool: ralphex"
+    log_info "Building ralphex@${RALPHEX_VERSION} from github.com/umputun/ralphex/cmd/ralphex..."
+    mkdir -p "$LOCAL_BIN" || return 1
+    if ! GOBIN="$LOCAL_BIN" go install "github.com/umputun/ralphex/cmd/ralphex@${RALPHEX_VERSION}"; then
+        log_error "Failed to build ralphex."
+        return 1
+    fi
+    log_success "ralphex updated successfully to ${LOCAL_BIN}/ralphex"
+}
+
+update_revdiff() {
+    print_header "Go Tool: revdiff"
+    log_info "Building revdiff@${REVDIFF_VERSION} from github.com/umputun/revdiff/app..."
+    mkdir -p "$LOCAL_BIN" || return 1
+    if ! GOBIN="$LOCAL_BIN" go install "github.com/umputun/revdiff/app@${REVDIFF_VERSION}"; then
+        log_error "Failed to build revdiff."
+        return 1
+    fi
+    # The module path ends in /app, so `go install` names the binary "app".
+    if ! mv -f "${LOCAL_BIN}/app" "${LOCAL_BIN}/revdiff"; then
+        log_error "Compiled revdiff binary not found at ${LOCAL_BIN}/app"
+        return 1
+    fi
+    log_success "revdiff updated successfully to ${LOCAL_BIN}/revdiff"
+}
+
+update_beads() {
+    print_header "Go Tool: beads (bd)"
+    log_info "Building beads@${BEADS_VERSION} from github.com/steveyegge/beads/cmd/bd..."
+    mkdir -p "$LOCAL_BIN" || return 1
+    if ! GOBIN="$LOCAL_BIN" go install "github.com/steveyegge/beads/cmd/bd@${BEADS_VERSION}"; then
+        log_error "Failed to build beads."
+        return 1
+    fi
+    ln -sf "${LOCAL_BIN}/bd" "${LOCAL_BIN}/beads"
+    log_success "beads (bd) updated successfully to ${LOCAL_BIN}/bd"
+}
+
+update_apt_go() {
+    print_header "System Packages: Go, gh, glab, curl, npm, jq, ripgrep, fzf, htop"
+    # The only target that genuinely needs root. The devbox user deliberately
+    # has no sudo (issue #16), so say what to do instead of failing obscurely.
+    if [ "$(id -u)" -ne 0 ]; then
+        log_error "This target upgrades apt packages and must be run as root."
+        log_error "Run it as root, or under sudo from an account that has it:"
+        log_error "    sudo update-tools go"
+        return 1
+    fi
+    log_info "Checking apt for package upgrades..."
+    apt-get update -qq
+    if apt-get install --only-upgrade -y golang-go golang gh glab curl nodejs npm libicu-dev jq ripgrep fzf htop tree zip unzip fd-find bubblewrap; then
+        log_success "System package upgrades completed!"
+    else
+        log_warn "Could not upgrade system packages via apt."
+    fi
+}
+
+show_versions() {
+    print_header "Updated Tool Versions"
+    echo -n "  • claude:      "; command -v claude >/dev/null && claude --version 2>&1 || echo "not installed"
+    echo -n "  • codex:       "; command -v codex >/dev/null && codex --version 2>&1 || echo "not installed"
+    echo -n "  • jules:       "; command -v jules >/dev/null && (jules version 2>/dev/null | head -n 1 || npm list -g --depth=0 @google/jules 2>/dev/null | grep @google/jules | tr -d '├── ') || echo "not installed"
+    echo -n "  • wrangler:    "; command -v wrangler >/dev/null && wrangler --version 2>&1 | head -n 1 || echo "not installed"
+    echo -n "  • pnpm:        "; command -v pnpm >/dev/null && pnpm --version 2>&1 || echo "not installed"
+    echo -n "  • uv:          "; command -v uv >/dev/null && uv --version 2>&1 || echo "not installed"
+    echo -n "  • cloudflared: "; command -v cloudflared >/dev/null && cloudflared --version 2>&1 | head -n 1 || echo "not installed"
+    echo -n "  • agy:         "; command -v agy >/dev/null && agy --version 2>&1 || echo "not installed"
+    echo -n "  • beads (bd):  "; command -v bd >/dev/null && bd --version 2>&1 | head -n 1 || echo "not installed"
+    echo -n "  • ralphex:     "; command -v ralphex >/dev/null && ralphex --version 2>&1 || echo "not installed"
+    echo -n "  • revdiff:     "; command -v revdiff >/dev/null && (revdiff_ver=$(go version -m "$(command -v revdiff)" 2>/dev/null | grep 'mod	github.com/umputun/revdiff' | awk '{print $3}'); echo "${revdiff_ver:-updated}") || echo "not installed"
+    echo -n "  • go:          "; command -v go >/dev/null && go version 2>&1 || echo "not installed"
+    echo -n "  • gh:          "; command -v gh >/dev/null && gh --version 2>&1 | head -n 1 || echo "not installed"
+    echo -n "  • glab:        "; command -v glab >/dev/null && glab --version 2>&1 | head -n 1 || echo "not installed"
+    echo -n "  • curl:        "; command -v curl >/dev/null && curl --version 2>&1 | head -n 1 || echo "not installed"
+    echo -n "  • npm:         "; command -v npm >/dev/null && npm --version 2>&1 || echo "not installed"
+    echo -n "  • jq:          "; command -v jq >/dev/null && jq --version 2>&1 | head -n 1 || echo "not installed"
+    echo -n "  • ripgrep:     "; command -v rg >/dev/null && rg --version 2>&1 | head -n 1 || echo "not installed"
+    echo -n "  • fzf:         "; command -v fzf >/dev/null && fzf --version 2>&1 | head -n 1 || echo "not installed"
+    echo ""
+}
+
+show_help() {
+    echo "Usage: update-tools [OPTION|TOOL]"
+    echo ""
+    echo "Updates installed CLI tools (npm, go, agy, uv, cloudflared, apt)."
+    echo ""
+    echo "Everything installs into \$HOME/.local (bin: ${LOCAL_BIN}) and needs no"
+    echo "sudo. The 'go' target is the exception - apt needs root."
+    echo ""
+    echo "Options / Targets:"
+    echo "  all          Update all tools (default)"
+    echo "  npm          Update claude, codex, jules, wrangler, pnpm (via npm)"
+    echo "  uv           Update uv Python package manager"
+    echo "  cloudflared  Update cloudflared CLI"
+    echo "  agy          Update agy CLI"
+    echo "  beads|bd     Update beads (bd) Go binary"
+    echo "  ralphex      Update ralphex Go binary"
+    echo "  revdiff      Update revdiff Go binary"
+    echo "  go           Update system Go and other apt packages (needs root)"
+    echo "  -v, --version, versions  Show current versions"
+    echo "  -h, --help   Show this help message"
+    echo ""
+    echo "Version pins (env overrides, defaults mirror ansible/roles/devtools/defaults/main.yml):"
+    echo "  BEADS_VERSION, RALPHEX_VERSION, REVDIFF_VERSION  go install suffix (default: latest)"
+    echo "  CLOUDFLARED_VERSION, CLOUDFLARED_SHA256          release tag + binary checksum"
+    echo "  NPM_PACKAGES                                     space-separated pkg@version list"
+    echo "  LOCAL_BIN, NPM_CONFIG_PREFIX                     install locations"
+}
+
+main() {
+    TARGET="${1:-all}"
+
+    case "$TARGET" in
+        all)
+            update_npm_tools
+            update_uv
+            update_cloudflared
+            update_agy
+            update_beads
+            update_ralphex
+            update_revdiff
+            if [ "$(id -u)" -eq 0 ]; then
+                update_apt_go
+            else
+                log_warn "Skipping apt package upgrades (needs root): sudo update-tools go"
+            fi
+            show_versions
+            ;;
+        npm|node)
+            update_npm_tools
+            ;;
+        uv)
+            update_uv
+            ;;
+        cloudflared)
+            update_cloudflared
+            ;;
+        agy)
+            update_agy
+            ;;
+        beads|bd)
+            update_beads
+            ;;
+        ralphex)
+            update_ralphex
+            ;;
+        revdiff)
+            update_revdiff
+            ;;
+        go|golang)
+            update_apt_go
+            ;;
+        -v|--version|versions|status)
+            show_versions
+            ;;
+        -h|--help|help)
+            show_help
+            ;;
+        *)
+            log_error "Unknown target '$TARGET'"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
+

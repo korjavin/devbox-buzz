@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+#
+# agy - YOLO-mode wrapper for Antigravity CLI
+# Automatically passes --dangerously-skip-permissions to bypass all interactive prompts
+
+AGY_BIN="${HOME}/.local/bin/agy.bin"
+
+if [ -f "$AGY_BIN" ]; then
+    exec "$AGY_BIN" --dangerously-skip-permissions "$@"
+elif command -v agy.bin >/dev/null 2>&1; then
+    exec agy.bin --dangerously-skip-permissions "$@"
+else
+    echo "Error: agy.bin executable not found in ${HOME}/.local/bin/ or PATH" >&2
+    exit 1
+fi

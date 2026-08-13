@@ -1,0 +1,21 @@
+---
+# Pinned toolchain versions.
+# bump: check upstream releases, update the value here, re-run the playbook.
+
+# NodeSource setup script major (https://github.com/nodesource/distributions).
+# The setup_<major>.x script is still curl|bash - unavoidable, see threat model.
+node_major: 22
+
+# Put the devbox user in the `sudo` group (issue #16). Off by default: the whole
+# toolchain now installs into ~/.local, so nothing the agent runs needs root,
+# and the account has no password to authenticate sudo with anyway. Turning this
+# on grants nothing on its own - you would also have to set a password or a
+# sudoers rule, which is exactly what this is meant to avoid.
+# Note: `append: yes` means flipping this back to false does NOT remove the
+# group from an already-provisioned box - do that by hand (`gpasswd -d`).
+devbox_user_sudo: false
+
+# SSH hardening (issue #4). Safe to leave on: Terraform provisions the box with
+# an SSH key and the inventory connects over that key, so password auth is dead
+# weight. Set to false only if you need password login.
+harden_ssh: true

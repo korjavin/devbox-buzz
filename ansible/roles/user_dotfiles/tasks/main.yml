@@ -1,0 +1,63 @@
+---
+- name: Ensure .config and .claude directories exist
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: '0755'
+  loop:
+    - "{{ devbox_user_home }}/.config"
+    - "{{ devbox_user_home }}/.claude"
+    - "{{ devbox_user_home }}/.local/bin"
+
+- name: Clone Neovim dotfiles
+  git:
+    repo: "{{ nvim_repo }}"
+    dest: "{{ devbox_user_home }}/.config/nvim"
+    force: yes
+  become_user: "{{ devbox_user }}"
+  when: nvim_repo | length > 0
+
+- name: Clone Claude skills repository
+  git:
+    repo: "{{ claude_skills_repo }}"
+    dest: "{{ devbox_user_home }}/.claude/claude-common-skills"
+    force: yes
+  become_user: "{{ devbox_user }}"
+  when: claude_skills_repo | length > 0
+
+- name: Symlink Claude skills folder
+  file:
+    src: "{{ devbox_user_home }}/.claude/claude-common-skills/skills"
+    dest: "{{ devbox_user_home }}/.claude/skills"
+    state: link
+    force: yes
+  become_user: "{{ devbox_user }}"
+  when: claude_skills_repo | length > 0
+
+- name: Clone user dotfiles via yadm
+  shell: |
+    if ! yadm rev-parse --git-dir >/dev/null 2>&1; then
+      yadm clone -f {{ dotfiles_repo | quote }}
+    else
+      yadm pull
+    fi
+  become_user: "{{ devbox_user }}"
+  # without this a private repo blocks forever on git's credential prompt
+  environment:
+    GIT_TERMINAL_PROMPT: "0"
+  ignore_errors: yes
+  when: dotfiles_repo | length > 0
+
+- name: Configure developer shell aliases (~/.bash_aliases)
+  copy:
+    dest: "{{ devbox_user_home }}/.bash_aliases"
+    content: |
+      # ~/.local/bin/agy already adds --dangerously-skip-permissions
+      alias antigravity="agy"
+      alias ralphex-gemini="ralphex --config-dir=$HOME/.config/ralphex-gemini"
+      alias ralphex-claude="ralphex --config-dir=$HOME/.config/ralphex-claude"
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: '0644'
