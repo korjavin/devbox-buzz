@@ -1,0 +1,18 @@
+---
+- name: Provision Buzzbox Devbox Server
+  hosts: devbox
+  become: yes
+  vars:
+    # Consumed by the system (creates it), docker, devtools and user_dotfiles
+    # roles. Override with -e devbox_user=yourname.
+    devbox_user: "devbox"
+    devbox_user_home: "/home/{{ devbox_user }}"
+    # Unused for now: Caddy will use it for ACME/TLS once the buzz roles land.
+    acme_email: "admin@example.com"
+
+  roles:
+    - role: system
+    - role: docker
+    - role: devtools
+    - role: user_dotfiles
+    # TODO: buzz roles (relay stack, Caddy, agents) slot in here.

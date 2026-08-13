@@ -1,0 +1,122 @@
+---
+# Node.js (with bundled npm) comes from the NodeSource repo in the system role.
+# Installing Ubuntu's `npm` package here drags in the distro nodejs and apt
+# bails out with "held broken packages".
+
+# Everything below installs into the devbox user's ~/.local so the agent never
+# needs root to update its own toolchain (issue #16). ~/.local/bin also gets
+# created by roles/user_dotfiles, but that runs after us.
+- name: Ensure ~/.local/bin exists
+  file:
+    path: "{{ devbox_user_home }}/.local/bin"
+    state: directory
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: '0755'
+
+# In ~/.npmrc rather than NPM_CONFIG_PREFIX so an interactive `npm i -g foo`
+# lands in the same place as the playbook's installs.
+- name: Point npm's global prefix at ~/.local for the devbox user
+  lineinfile:
+    path: "{{ devbox_user_home }}/.npmrc"
+    regexp: '^prefix='
+    line: "prefix={{ devbox_user_home }}/.local"
+    create: yes
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: '0644'
+
+- name: Install global npm AI & Dev CLI tools (claude-code, codex, jules, wrangler, pnpm)
+  npm:
+    name: "{{ item.key }}"
+    version: "{{ item.value if item.value != 'latest' else omit }}"
+    global: yes
+    state: "{{ 'latest' if item.value == 'latest' else 'present' }}"
+  loop: "{{ npm_global_packages | dict2items }}"
+  become_user: "{{ devbox_user }}"
+
+- name: Put ~/.local/bin on PATH for every login shell
+  copy:
+    dest: /etc/profile.d/devbox-path.sh
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      # Managed by ansible (roles/devtools). The devbox toolchain (npm globals,
+      # go binaries, cloudflared, uv) installs per-user into ~/.local/bin.
+      # Prepended on purpose: it must win over stale root-installed copies in
+      # /usr/bin left behind by earlier provisioning runs.
+      if [ -n "${HOME:-}" ] && [ -d "$HOME/.local/bin" ]; then
+          case ":$PATH:" in
+              *":$HOME/.local/bin:"*) ;;
+              *) PATH="$HOME/.local/bin:$PATH"; export PATH ;;
+          esac
+      fi
+
+# Same deal as NodeSource: astral ships no apt repo, so curl|sh stays. pipefail
+# at least stops a half-downloaded installer from being executed.
+- name: Install uv (Python package & environment manager)
+  shell: |
+    set -o pipefail
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+  args:
+    executable: /bin/bash
+  become_user: "{{ devbox_user }}"
+
+- name: Warn that cloudflared will be installed unverified
+  debug:
+    msg: >-
+      cloudflared_sha256 is empty: the binary is downloaded over TLS but its
+      contents are not verified. Set cloudflared_sha256 in
+      roles/devtools/defaults/main.yml to pin it.
+  when: not cloudflared_sha256
+
+# The raw binary, not the .deb: dpkg needs root, a file in ~/.local/bin does
+# not. get_url with a checksum is a no-op once the right version is in place.
+- name: Install Cloudflare Tunnel CLI (cloudflared)
+  get_url:
+    url: "https://github.com/cloudflare/cloudflared/releases/{{ ('download/' ~ cloudflared_version) if cloudflared_version != 'latest' else 'latest/download' }}/cloudflared-linux-amd64"
+    dest: "{{ devbox_user_home }}/.local/bin/cloudflared"
+    checksum: "{{ ('sha256:' ~ cloudflared_sha256) if cloudflared_sha256 else omit }}"
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: '0755'
+
+- name: "Build and install Go CLI tool: beads (bd)"
+  shell: |
+    GOBIN={{ devbox_user_home }}/.local/bin go install github.com/steveyegge/beads/cmd/bd@{{ beads_version }}
+  become_user: "{{ devbox_user }}"
+
+# Separate task on purpose: as the second line of the shell above, a successful
+# ln masked a failed go install and the task reported ok with no binary.
+- name: "Symlink beads -> bd"
+  file:
+    src: "{{ devbox_user_home }}/.local/bin/bd"
+    dest: "{{ devbox_user_home }}/.local/bin/beads"
+    state: link
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+  become_user: "{{ devbox_user }}"
+
+- name: "Build and install Go CLI tool: ralphex"
+  shell: |
+    GOBIN={{ devbox_user_home }}/.local/bin go install github.com/umputun/ralphex/cmd/ralphex@{{ ralphex_version }}
+  become_user: "{{ devbox_user }}"
+
+# Installs from .../revdiff/app, so `go install` names the binary "app".
+- name: "Build and install Go CLI tool: revdiff"
+  shell: |
+    GOBIN={{ devbox_user_home }}/.local/bin go install github.com/umputun/revdiff/app@{{ revdiff_version }} &&
+    mv -f {{ devbox_user_home }}/.local/bin/app {{ devbox_user_home }}/.local/bin/revdiff
+  become_user: "{{ devbox_user }}"
+
+- name: Install update-tools and agy wrapper scripts to ~/.local/bin
+  copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: '0755'
+  loop:
+    - { src: "{{ playbook_dir }}/../bin/update-tools", dest: "{{ devbox_user_home }}/.local/bin/update-tools" }
+    - { src: "{{ playbook_dir }}/../bin/agy", dest: "{{ devbox_user_home }}/.local/bin/agy" }

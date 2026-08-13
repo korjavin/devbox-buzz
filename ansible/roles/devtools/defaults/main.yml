@@ -1,0 +1,35 @@
+---
+# Pinned toolchain versions.
+# bump: check upstream releases (gh release list --repo <repo>, npm view <pkg> version),
+#       update the value here, re-run the playbook.
+#
+# Anything left at "latest" is deliberately unpinned: these are agent CLIs that
+# ship near-daily and pinning them rots faster than it protects. The pin is
+# wired up though - set a real version and it is honoured.
+
+# cloudflared: proper release tags, slow moving -> actually pinned.
+# Verified: gh release list --repo cloudflare/cloudflared
+cloudflared_version: "2026.7.3"
+# sha256 of the cloudflared-linux-amd64 *binary* (not the .deb) for the tag
+# above - it is dropped into ~/.local/bin so the install needs no root.
+# Cloudflare publishes no checksum file, so this is trust-on-first-use:
+# recorded once, verified on every run after.
+# bump: sha256sum the new binary and paste it here.
+cloudflared_sha256: "9d71c677db00134c1bd4144b7783486b654ad281b1ea62b4972098d19f770f17"
+
+# Go tools. Any valid `go install` suffix works: "latest", "v1.2.3", a commit.
+# Current upstream tags at time of writing (drop them in to pin):
+#   beads v1.1.2 | ralphex v1.6.1 | revdiff v1.12.0
+beads_version: "latest"
+ralphex_version: "latest"
+revdiff_version: "latest"
+
+# Global npm packages: name -> version. "latest" means unpinned.
+# Current upstream at time of writing: claude-code 2.1.223, codex 0.146.1,
+# jules 0.1.42, wrangler 4.119.0, pnpm 11.20.0
+npm_global_packages:
+  "@anthropic-ai/claude-code": "latest"
+  "@openai/codex": "latest"
+  "@google/jules": "latest"
+  "wrangler": "latest"
+  "pnpm": "latest"

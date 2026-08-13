@@ -1,0 +1,34 @@
+---
+- name: Install Docker and Docker Compose plugin
+  apt:
+    name:
+      - docker.io
+      - docker-compose-v2
+    state: present
+
+- name: Add user to docker group
+  user:
+    name: "{{ devbox_user }}"
+    groups: docker
+    append: yes
+
+- name: Enable and start Docker service
+  systemd:
+    name: docker
+    enabled: yes
+    state: started
+
+- name: Configure logrotate for Docker containers
+  copy:
+    dest: /etc/logrotate.d/docker-containers
+    content: |
+      /var/lib/docker/containers/*/*.log {
+        rotate 7
+        daily
+        compress
+        missingok
+        delaycompress
+        copytruncate
+        maxsize 50M
+      }
+    mode: '0644'

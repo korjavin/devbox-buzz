@@ -1,0 +1,89 @@
+---
+# Can't avoid the curl|bash here (NodeSource ships no other installer), but at
+# least pipefail it so a truncated download doesn't get piped into a shell.
+- name: Check which NodeSource major is configured
+  # recent setup scripts write deb822 nodesource.sources, older ones
+  # nodesource.list, so search the whole directory rather than one filename
+  command: grep -rq "node_{{ node_major }}\.x" /etc/apt/sources.list.d/
+  register: nodesource_configured
+  failed_when: false
+  changed_when: false
+
+- name: Add NodeSource Node.js LTS repository
+  shell: |
+    set -o pipefail
+    curl -fsSL https://deb.nodesource.com/setup_{{ node_major }}.x | bash -
+  args:
+    executable: /bin/bash
+  when: nodesource_configured.rc != 0
+
+- name: Update apt cache and install base system packages
+  apt:
+    name:
+      - curl
+      - wget
+      - git
+      - build-essential
+      - neovim
+      - tmux
+      - mosh
+      - logrotate
+      - golang-go
+      - gh
+      - glab
+      - nodejs
+      - libicu-dev
+      - jq
+      - ripgrep
+      - fzf
+      - htop
+      - tree
+      - zip
+      - unzip
+      - fd-find
+      - bubblewrap
+      - yadm
+      - ca-certificates
+      - gnupg
+    state: present
+    update_cache: yes
+
+- name: Ensure devbox user exists
+  user:
+    name: "{{ devbox_user }}"
+    shell: /bin/bash
+    groups: "{{ ['sudo'] if devbox_user_sudo else omit }}"
+    # append with no groups is a module error, so it tracks devbox_user_sudo
+    append: "{{ devbox_user_sudo | bool }}"
+
+# SSH hardening (issue #4). Key-only from Terraform onwards, so killing password
+# auth locks nobody out. Set harden_ssh: false to skip.
+- name: Install fail2ban
+  apt:
+    name: fail2ban
+    state: present
+  when: harden_ssh
+
+- name: Enable and start fail2ban
+  service:
+    name: fail2ban
+    enabled: yes
+    state: started
+  when: harden_ssh
+
+- name: Disable SSH password authentication
+  copy:
+    dest: /etc/ssh/sshd_config.d/00-devbox.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      # Managed by ansible (roles/system). See harden_ssh in defaults/main.yml.
+      # 00- prefix on purpose: sshd takes the FIRST value for a keyword and
+      # Include reads sshd_config.d/*.conf in lexical order, so a 99- file would
+      # lose to the cloud image's 50-cloud-init.conf.
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin prohibit-password
+  when: harden_ssh
+  notify: Reload sshd
