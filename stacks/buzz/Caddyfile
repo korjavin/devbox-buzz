@@ -1,6 +1,7 @@
 # Vendored from block/buzz deploy/compose/Caddyfile
-# @ 0571f5455b1b2aeea7334082f0df9d1f19b22f7d. Only addition: the global block
-# giving Let's Encrypt an account e-mail (ACME_EMAIL, set by the ansible role).
+# @ 0571f5455b1b2aeea7334082f0df9d1f19b22f7d. Additions: the global block
+# giving Let's Encrypt an account e-mail (ACME_EMAIL, set by the ansible role),
+# and the /pair route (see below).
 {
   email {$ACME_EMAIL}
 }
@@ -8,5 +9,18 @@
 {$BUZZ_DOMAIN} {
   encode zstd gzip
 
-  reverse_proxy relay:3000
+  # devbox: NIP-AB device pairing WebSocket. buzz-pair-relay is a standalone
+  # process (see compose.caddy.yml) and its docs require the proxy to route
+  # only /pair to it -- the relay has no /pair route, so without this the
+  # desktop's pairing QR points at a 404. Nothing else in the relay router
+  # starts with /pair. Caddy forwards the client Host untouched, so the main
+  # relay's Host-based community routing below is unaffected (and the pair
+  # relay ignores Host entirely).
+  handle /pair* {
+    reverse_proxy pair-relay:5000
+  }
+
+  handle {
+    reverse_proxy relay:3000
+  }
 }

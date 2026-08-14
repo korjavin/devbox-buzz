@@ -1,5 +1,5 @@
 # Vendored from block/buzz deploy/compose/compose.caddy.yml
-# @ 0571f5455b1b2aeea7334082f0df9d1f19b22f7d, with two local adaptations
+# @ 0571f5455b1b2aeea7334082f0df9d1f19b22f7d, with local adaptations
 # (marked "devbox:" below). Needs Docker Compose v2.24.4+ for the !override tag.
 services:
   relay:
@@ -11,10 +11,40 @@ services:
     ports: !override
       - "127.0.0.1:${BUZZ_HTTP_PORT:-3000}:3000"
 
+  # devbox: NIP-AB device pairing is a SEPARATE binary in the same image
+  # (Dockerfile builds /usr/local/bin/buzz-pair-relay; the relay router has no
+  # /pair route). Upstream ships it only in deploy/charts (pairingRelay.*), so
+  # the compose bundle grows it here. Stateless, no auth, no persistence --
+  # it must never be published on the host: only Caddy's /pair route reaches it.
+  pair-relay:
+    image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}
+    # The image ENTRYPOINT is buzz-relay, so override it (helm uses `command`,
+    # which overrides the entrypoint in Kubernetes but not in Docker).
+    entrypoint: ["/usr/local/bin/buzz-pair-relay"]
+    environment:
+      # Default is 127.0.0.1:5000, i.e. unreachable from another container.
+      BUZZ_PAIR_RELAY_BIND_ADDR: 0.0.0.0:5000
+    # The chart probes this with a bare tcpSocket (the process answers 400 to
+    # anything that is not a WebSocket upgrade), so connect and hang up. Same
+    # /dev/tcp trick the relay healthcheck in compose.yml uses, for the same
+    # reason: the runtime image cannot be relied on to carry curl/wget/socat.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/5000'"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - buzz-net
+
   caddy:
     image: caddy:2-alpine
     depends_on:
       relay:
+        condition: service_healthy
+      # devbox: added with the pair-relay service above.
+      pair-relay:
         condition: service_healthy
     environment:
       BUZZ_DOMAIN: ${BUZZ_DOMAIN:?set BUZZ_DOMAIN}

@@ -12,7 +12,15 @@ comment). Adaptations, all local and all commented in place:
   terminates TLS. We `!override` it down to `127.0.0.1:<port>:3000` instead,
   because a host-side agent process connects to `ws://127.0.0.1:<port>`. Also
   passes `ACME_EMAIL` to Caddy.
-- `Caddyfile` — global block with `email {$ACME_EMAIL}` for ACME registration.
+- `compose.caddy.yml` — adds a `pair-relay` service. NIP-AB device pairing is a
+  separate binary (`/usr/local/bin/buzz-pair-relay`) that upstream's compose
+  bundle never runs; only `deploy/charts` does (`pairingRelay.*`). Without it
+  the desktop's pairing QR points at a 404.
+- `Caddyfile` — global block with `email {$ACME_EMAIL}` for ACME registration,
+  plus a `/pair` route to `pair-relay:5000` (everything else goes to the relay).
+  `ansible/roles/buzz` also sets `BUZZ_PAIRING_RELAY_URL=wss://<host>/pair`, which
+  the relay advertises as `pairing_relay_url` in its NIP-11 document — that is
+  how clients discover the pairing endpoint. Same domain, no extra DNS record.
 - `.env.example` is not vendored: `ansible/roles/buzz/templates/env.j2` is the
   adapted copy and is the only thing that writes `/opt/buzz/.env`.
 - `compose.dev.yml` is not vendored (local admin ports/tools, not wanted here).

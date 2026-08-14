@@ -71,6 +71,7 @@
     src: "{{ playbook_dir }}/../stacks/buzz/"
     dest: "{{ buzz_dir }}/"
     mode: preserve
+  register: _buzz_bundle
 
 - name: Template the buzz stack .env
   template:
@@ -89,6 +90,19 @@
     BUZZ_COMPOSE_TLS: "true"
   register: _buzz_up
   changed_when: "'Started' in _buzz_up.stderr or 'Created' in _buzz_up.stderr"
+
+# The Caddyfile is a bind mount, so compose has no reason to recreate Caddy
+# when its contents change -- an edited route would silently not take effect on
+# a live box. `caddy reload` validates the file first and is zero-downtime; on
+# a fresh box it is a no-op reload of the config Caddy just started with.
+- name: Reload Caddy so a changed Caddyfile takes effect
+  command: >-
+    docker compose --env-file .env -f compose.yml -f compose.caddy.yml
+    exec -T caddy caddy reload --config /etc/caddy/Caddyfile
+  args:
+    chdir: "{{ buzz_dir }}"
+  when: _buzz_bundle is changed
+  changed_when: true
 
 # `up --wait` already blocks on the relay's own healthcheck (which probes
 # /_readiness on the in-container health port). This is the check that the
