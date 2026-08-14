@@ -126,6 +126,44 @@ buzz channels add-member --channel <channel uuid> --pubkey <agent pubkey> --role
 Every agent needs its **own** keypair — never share one.
 Swap `BUZZ_ACP_AGENT_COMMAND` for `codex-acp` or `goose` to attach a different brain.
 
+### Run agents from the app on your own machine
+
+The desktop app can also run a harness **locally** — it spawns the process on your own Mac instead of on the
+box. Settings → Agents shows one row per harness, and **"Adapter needed"** means the CLI is installed but
+the ACP adapter beside it is not:
+
+| Row | CLI it looks for | Adapter binary | npm package |
+|---|---|---|---|
+| Claude Code | `claude` | `claude-agent-acp` (or `claude-code-acp`) | `@agentclientprotocol/claude-agent-acp` |
+| Codex | `codex` | `codex-acp`, **1.1.7 or newer** | `@agentclientprotocol/codex-acp` |
+
+The row's own **Install** button is the supported path and needs nothing installed first: the app downloads
+a private Node.js into `~/Library/Application Support/Buzz/runtimes/node/` and installs the adapter into
+`~/Library/Application Support/Buzz/node-tools/`, its own npm prefix — your system npm is never touched.
+There is no cancel button, the per-command ceiling is 15 minutes, and a second Install for the same row is
+refused while one is in flight, so a **spinner that has been up a while is usually still downloading**, not
+wedged. Restarting the app clears it.
+
+Installing the adapters yourself is one command, and it does not conflict — the app checks its own private
+prefix first and keeps using its copy when both exist:
+
+```bash
+npm install -g @agentclientprotocol/claude-agent-acp @agentclientprotocol/codex-acp
+```
+
+Then hit **Check again**. If the row still says "Adapter needed", your npm prefix is somewhere the app does
+not look. It probes its private prefix, then `$PATH`, then `command -v` in a **login** shell (`~/.zprofile`
+and `~/.zshenv` — *not* `~/.zshrc`), then `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `~/.local/bin`,
+`~/.volta/bin`, `~/.asdf/shims`, `~/.bun/bin`, `~/.local/share/mise/shims`, and finally nvm's `default`
+alias. Compare that list against `npm prefix -g`, and export the fix from `~/.zprofile` — a `PATH` set only
+in `~/.zshrc` is invisible to a GUI app.
+
+("Update needed" on Codex is the old `@zed-industries/codex-acp` 0.16.x; Install replaces it.)
+
+The catalog and detection order are in
+[`desktop/src-tauri/src/managed_agents/discovery.rs`](https://github.com/block/buzz/blob/main/desktop/src-tauri/src/managed_agents/discovery.rs)
+(`KNOWN_ACP_RUNTIMES`, `resolve_command`) in [block/buzz](https://github.com/block/buzz).
+
 ---
 
 ## Threat model
