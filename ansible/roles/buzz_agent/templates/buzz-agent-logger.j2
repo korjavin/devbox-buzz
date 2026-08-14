@@ -1,0 +1,64 @@
+#!/bin/bash
+# Managed by ansible (roles/buzz_agent) — do not edit on the box.
+#
+#   buzz-agent-logger <agent-name>
+#
+# Follows one agent's journal and posts it, batched, into that agent's private
+# debug channel. Runs as the forwarder identity (~/.config/buzz-logs), not as
+# the agent: the debug channel is a log sink, and the agent is not a member of
+# it.
+set -uo pipefail
+
+agent=${1:?usage: buzz-agent-logger <agent-name>}
+channel=$(cat "{{ devbox_user_home }}/.config/buzz-agent-$agent/debug_channel")
+
+export BUZZ_RELAY_URL={{ buzz_relay_url }}
+export BUZZ_PRIVATE_KEY=$(cat "{{ buzz_agent_logger_dir }}/secret_key")
+self=$(cat "{{ buzz_agent_logger_dir }}/public_key")
+buzz={{ devbox_user_home }}/.local/bin/buzz
+
+flush_secs={{ buzz_agent_log_flush_seconds }}
+max_lines={{ buzz_agent_log_max_lines }}
+max_line=800
+# The relay refuses content over 65536 bytes ("content exceeds maximum size
+# (N > 65536 bytes)"), so one batch stays well under that.
+max_bytes=16000
+
+buf=""
+lines=0
+
+{# raw: bash's ${#buf} would otherwise open a jinja comment #}
+{% raw %}
+flush() {
+  [[ -n $buf ]] || return 0
+  # Fenced so clients render a log block rather than markdown. --mention <self>
+  # makes any @word inside a log line presentation-only, so the relay cannot
+  # reject a batch over a mention that resolves to nobody. timeout: a wedged
+  # relay connection must not stall the follow.
+  printf '```\n%s```' "$buf" |
+    timeout 30 "$buzz" messages send \
+      --channel "$channel" --mention "$self" --content - >/dev/null ||
+    echo "send failed, dropped $lines line(s)" >&2
+  buf=""
+  lines=0
+}
+
+# -n0: new lines only. `journalctl -f` follows the journal, not the process, so
+# an agent restart does not end the stream. No feedback loop: this unit is
+# buzz-agent-logger@%i and the stream is buzz-agent@%i, so neither this script's
+# own stderr nor the `buzz` send is in it.
+journalctl -f -n0 -o cat -u "buzz-agent@$agent" |
+  sed -u 's/\x1b\[[0-9;]*[a-zA-Z]//g' |
+  while true; do
+    if IFS= read -r -t "$flush_secs" line; then
+      buf+="${line:0:$max_line}"$'\n'
+      lines=$((lines + 1))
+      if ((lines >= max_lines || ${#buf} >= max_bytes)); then flush; fi
+    elif (($? > 128)); then
+      flush # batch window closed
+    else
+      flush # EOF: journalctl went away, systemd restarts the unit
+      exit 0
+    fi
+  done
+{% endraw %}

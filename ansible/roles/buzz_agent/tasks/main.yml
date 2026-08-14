@@ -122,6 +122,17 @@
       membership) only exists inside the relay image.
     quiet: yes
 
+# Needed for the agent->owner backfill in agent.yml (see the comment there).
+# psql only exists in the postgres image, and it reads POSTGRES_USER/DB from
+# its own environment, so nothing about the credentials is repeated here.
+- name: Locate the relay's postgres container
+  command: >-
+    docker ps -q
+    --filter label=com.docker.compose.project={{ buzz_compose_project }}
+    --filter label=com.docker.compose.service=postgres
+  register: postgres_container
+  changed_when: false
+
 # --- one unit for all agents ---------------------------------------------
 - name: Install the buzz-agent@ systemd template unit
   template:
@@ -163,6 +174,93 @@
            {{ devbox_user_home }}/.config/buzz-agent-claude
       args:
         creates: "{{ devbox_user_home }}/.config/buzz-agent-claude"
+
+# --- log forwarder --------------------------------------------------------
+# One identity for all the debug channels, separate from the agents on
+# purpose: an agent that were a member of its own debug channel would see its
+# log lines come back as channel events (and show up in the room as a
+# participant). The relay refuses posts from non-members —
+# "restricted: not a channel member" — so the forwarder needs a key of its own.
+- name: Create the log forwarder's config directory
+  file:
+    path: "{{ buzz_agent_logger_dir }}"
+    state: directory
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: '0700'
+
+- name: Check for an existing log forwarder keypair
+  stat:
+    path: "{{ buzz_agent_logger_dir }}/secret_key"
+  register: logger_secret_key
+
+- name: Generate the log forwarder's Nostr keypair
+  command: docker exec {{ relay_container.stdout }} buzz-admin generate-key
+  register: generated_logger_key
+  when: not logger_secret_key.stat.exists
+  no_log: yes
+
+- name: Persist the log forwarder's Nostr keypair
+  copy:
+    content: "{{ generated_logger_key.stdout_lines | select('search', item.match) | first | split | last }}"
+    dest: "{{ buzz_agent_logger_dir }}/{{ item.name }}"
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { name: 'public_key', match: '^Public key', mode: '0644' }
+    - { name: 'secret_key', match: '^Secret key', mode: '0600' }
+  loop_control:
+    label: "{{ item.name }}"
+  when: not logger_secret_key.stat.exists
+  no_log: yes
+
+- name: Read back the log forwarder's pubkey
+  slurp:
+    src: "{{ buzz_agent_logger_dir }}/public_key"
+  register: logger_public_key
+
+- name: Bind the log forwarder's pubkey
+  set_fact:
+    buzz_agent_logger_pubkey: "{{ logger_public_key.content | b64decode | trim }}"
+
+- name: Admit the log forwarder's pubkey to the closed relay
+  command: >-
+    docker exec {{ relay_container.stdout }} buzz-admin add-member
+    --pubkey {{ buzz_agent_logger_pubkey }}
+    --role {{ buzz_agent_relay_role }}
+  register: add_logger_member
+  changed_when: "'added' in add_logger_member.stdout"
+
+- name: Publish the log forwarder's profile
+  become_user: "{{ devbox_user }}"
+  shell: >-
+    BUZZ_RELAY_URL={{ buzz_relay_url }}
+    BUZZ_PRIVATE_KEY=$(cat {{ buzz_agent_logger_dir }}/secret_key)
+    {{ devbox_user_home }}/.local/bin/buzz users set-profile
+    --name "logs"
+    --about "Forwards each agent's systemd journal into its debug channel."
+    && touch {{ buzz_agent_logger_dir }}/.profile_published
+  args:
+    creates: "{{ buzz_agent_logger_dir }}/.profile_published"
+
+- name: Install the journal forwarder
+  template:
+    src: buzz-agent-logger.j2
+    dest: /usr/local/bin/buzz-agent-logger
+    owner: root
+    group: root
+    mode: '0755'
+  notify: Restart buzz agent loggers
+
+- name: Install the buzz-agent-logger@ systemd template unit
+  template:
+    src: buzz-agent-logger@.service.j2
+    dest: /etc/systemd/system/buzz-agent-logger@.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart buzz agent loggers
 
 - name: Configure each agent
   include_tasks: agent.yml
