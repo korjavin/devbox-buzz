@@ -19,18 +19,16 @@
     line: "127.0.0.1 {{ buzz_host }}"
     regexp: '\s{{ buzz_host | regex_escape }}$'
 
-- name: Create the agent's config, workspace and lib directories
+- name: Create the shared workspace and lib directories
   file:
-    path: "{{ item.path }}"
+    path: "{{ item }}"
     state: directory
     owner: "{{ devbox_user }}"
     group: "{{ devbox_user }}"
-    mode: "{{ item.mode }}"
+    mode: '0755'
   loop:
-    # 0700: holds the agent's Nostr secret key and the harness environment.
-    - { path: "{{ buzz_agent_config_dir }}", mode: '0700' }
-    - { path: "{{ buzz_agent_workspace }}", mode: '0755' }
-    - { path: "{{ devbox_user_home }}/.local/lib/sprig", mode: '0755' }
+    - "{{ buzz_agent_workspace }}"
+    - "{{ devbox_user_home }}/.local/lib/sprig"
 
 # sprig is a multicall binary: one static musl ELF that becomes buzz-acp, the
 # `buzz` CLI, etc. depending on argv[0]. The .sha256 asset is fetched by
@@ -61,11 +59,11 @@
     owner: "{{ devbox_user }}"
     group: "{{ devbox_user }}"
   when: sprig_tarball.changed or not sprig_binary.stat.exists
-  notify: Restart buzz agent
+  notify: Restart buzz agents
 
 # ~/.local/bin is on PATH for login shells (roles/devtools). `buzz` has to be
 # there too: the base prompt tells the agent to reply with the buzz CLI.
-- name: Expose the sprig personalities the agent needs on PATH
+- name: Expose the sprig personalities the agents need on PATH
   file:
     src: "{{ devbox_user_home }}/.local/lib/sprig/sprig"
     dest: "{{ devbox_user_home }}/.local/bin/{{ item }}"
@@ -75,19 +73,34 @@
   loop:
     - buzz-acp
     - buzz
-  notify: Restart buzz agent
+  notify: Restart buzz agents
 
-# The ACP adapter buzz-acp spawns. Claude Code itself comes from roles/devtools.
-- name: Install the Claude ACP adapter
-  npm:
-    name: "@agentclientprotocol/claude-agent-acp"
-    global: yes
-    state: latest
-  become_user: "{{ devbox_user }}"
-  notify: Restart buzz agent
+# codex-acp shells out to the Codex CLI (installed by roles/devtools), which
+# reads ~/.codex/auth.json — there is no env-var path for a ChatGPT login.
+# force: no because codex refreshes the access token in this file on the box;
+# re-pushing the stashed copy would roll it back to an expired one.
+- name: Create the Codex CLI state directory
+  file:
+    path: "{{ devbox_user_home }}/.codex"
+    state: directory
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: '0700'
+  when: codex_auth_json | length > 0
 
-# --- relay identity + admission ------------------------------------------
-# Both steps below run buzz-admin, which ships inside the relay image
+- name: Install the Codex CLI credential
+  copy:
+    content: "{{ codex_auth_json }}"
+    dest: "{{ devbox_user_home }}/.codex/auth.json"
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: '0600'
+    force: no
+  no_log: yes
+  when: codex_auth_json | length > 0
+
+# --- relay admission plumbing --------------------------------------------
+# buzz-admin (keygen and membership) ships inside the relay image
 # (/usr/local/bin/buzz-admin) and needs the relay's DATABASE_URL, REDIS_URL and
 # BUZZ_RELAY_PRIVATE_KEY — so it is run inside the relay container, exactly as
 # upstream's deploy/compose/run.sh does.
@@ -109,101 +122,51 @@
       membership) only exists inside the relay image.
     quiet: yes
 
-- name: Check for an existing agent keypair
-  stat:
-    path: "{{ buzz_agent_config_dir }}/secret_key"
-  register: agent_secret_key
-
-# Settle, don't regenerate: a new keypair would be a new identity, losing the
-# agent's relay membership, DMs and history.
-- name: Generate the agent's Nostr keypair
-  command: docker exec {{ relay_container.stdout }} buzz-admin generate-key
-  register: generated_key
-  when: not agent_secret_key.stat.exists
-  no_log: yes
-
-- name: Persist the agent's Nostr keypair
-  copy:
-    content: "{{ generated_key.stdout_lines | select('search', item.match) | first | split | last }}"
-    dest: "{{ buzz_agent_config_dir }}/{{ item.name }}"
-    owner: "{{ devbox_user }}"
-    group: "{{ devbox_user }}"
-    mode: "{{ item.mode }}"
-  loop:
-    - { name: 'public_key', match: '^Public key', mode: '0644' }
-    - { name: 'secret_key', match: '^Secret key', mode: '0600' }
-  loop_control:
-    label: "{{ item.name }}"
-  when: not agent_secret_key.stat.exists
-  no_log: yes
-  notify: Restart buzz agent
-
-- name: Read back the agent's keys
-  slurp:
-    src: "{{ buzz_agent_config_dir }}/{{ item }}"
-  register: agent_keys
-  loop:
-    - public_key
-    - secret_key
-  no_log: yes
-
-- name: Bind the agent's keys for the tasks below
-  set_fact:
-    buzz_agent_pubkey: "{{ (agent_keys.results | selectattr('item', 'equalto', 'public_key') | first).content | b64decode | trim }}"
-    buzz_agent_privkey: "{{ (agent_keys.results | selectattr('item', 'equalto', 'secret_key') | first).content | b64decode | trim }}"
-  no_log: yes
-
-# Closed relay (BUZZ_REQUIRE_RELAY_MEMBERSHIP): only pubkeys in the
-# relay_members table may connect. RELAY_OWNER_PUBKEY is seeded at relay
-# startup; every other pubkey — including this agent — is admitted with
-# buzz-admin add-member, which writes the row and publishes the kind:13534
-# NIP-43 roster. Idempotent: a second run prints "already a member".
-- name: Admit the agent's pubkey to the closed relay
-  command: >-
-    docker exec {{ relay_container.stdout }} buzz-admin add-member
-    --pubkey {{ buzz_agent_pubkey }}
-    --role {{ buzz_agent_relay_role }}
-  register: add_member
-  changed_when: "'added' in add_member.stdout"
-
-# Without a kind:0 profile the agent shows as a bare pubkey in every client.
-# Replaceable event, so republishing on re-runs is harmless; the marker file
-# just avoids the relay round-trip on converges.
-- name: Publish the agent's profile (display name)
-  become_user: "{{ devbox_user }}"
-  shell: >-
-    BUZZ_RELAY_URL={{ buzz_relay_url }}
-    BUZZ_PRIVATE_KEY=$(cat {{ buzz_agent_config_dir }}/secret_key)
-    {{ devbox_user_home }}/.local/bin/buzz users set-profile
-    --name "{{ buzz_agent_display_name }}"
-    --about "{{ buzz_agent_about }}"
-    && touch {{ buzz_agent_config_dir }}/.profile_published
-  args:
-    creates: "{{ buzz_agent_config_dir }}/.profile_published"
-
-# --- service ---------------------------------------------------------------
-- name: Install the harness environment file
+# --- one unit for all agents ---------------------------------------------
+- name: Install the buzz-agent@ systemd template unit
   template:
-    src: buzz-agent.env.j2
-    dest: "{{ buzz_agent_config_dir }}/env"
-    owner: "{{ devbox_user }}"
-    group: "{{ devbox_user }}"
-    mode: '0600'
-  no_log: yes
-  notify: Restart buzz agent
-
-- name: Install the buzz-agent systemd unit
-  template:
-    src: buzz-agent.service.j2
-    dest: "/etc/systemd/system/{{ buzz_agent_service_name }}.service"
+    src: buzz-agent@.service.j2
+    dest: /etc/systemd/system/buzz-agent@.service
     owner: root
     group: root
     mode: '0644'
-  notify: Restart buzz agent
+  notify: Restart buzz agents
 
-- name: Enable and start the buzz agent
-  systemd:
-    name: "{{ buzz_agent_service_name }}"
-    enabled: yes
-    state: started
-    daemon_reload: yes
+# --- migration: single-agent layout -> per-agent -------------------------
+# Boxes provisioned before this role grew a `buzz_agents` list keep the claude
+# agent's keypair in ~/.config/buzz-agent behind a plain buzz-agent.service.
+# Move it, never regenerate it: the pubkey is already in channel member lists,
+# profiles and DMs. MUST run before the per-agent tasks, or the loop would see
+# an empty config dir and mint a new identity.
+- name: Check for the pre-multi-agent layout
+  stat:
+    path: "{{ devbox_user_home }}/.config/buzz-agent"
+  register: legacy_agent_dir
+
+- name: Migrate the single-agent layout to the per-agent one
+  when: legacy_agent_dir.stat.isdir | default(false)
+  block:
+    - name: Stop and disable the legacy buzz-agent unit
+      systemd:
+        name: buzz-agent
+        state: stopped
+        enabled: no
+
+    - name: Remove the legacy buzz-agent unit file
+      file:
+        path: /etc/systemd/system/buzz-agent.service
+        state: absent
+
+    - name: Move the claude agent's identity to its per-agent directory
+      command: >-
+        mv {{ devbox_user_home }}/.config/buzz-agent
+           {{ devbox_user_home }}/.config/buzz-agent-claude
+      args:
+        creates: "{{ devbox_user_home }}/.config/buzz-agent-claude"
+
+- name: Configure each agent
+  include_tasks: agent.yml
+  loop: "{{ buzz_agents }}"
+  loop_control:
+    loop_var: agent
+    label: "{{ agent.name }}"

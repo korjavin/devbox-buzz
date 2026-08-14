@@ -1,6 +1,6 @@
 # buzzbox
 
-One command turns a cloud VM into a [Buzz](https://github.com/block/buzz) relay you own, with a Claude agent already sitting in it.
+One command turns a cloud VM into a [Buzz](https://github.com/block/buzz) relay you own, with Claude and Codex agents already sitting in it.
 
 **Read [Threat model](#threat-model) before you deploy.** This box is deliberately unsafe by design.
 
@@ -34,6 +34,7 @@ nothing is stashed on the box), a domain on Cloudflare, and a Hetzner or Digital
 | `secrets/devbox-base-domain` | e.g. `dev.example.com` → box `foo` becomes `foo.dev.example.com` |
 | `secrets/acme-email` | Let's Encrypt contact |
 | `secrets/claude-code-oauth-token` | `claude setup-token` output. Omit it and you get a relay with no built-in agent |
+| `secrets/codex-auth-json` | Contents of `~/.codex/auth.json` after `codex login`. Omit it and the codex agent starts but cannot authenticate |
 | `secrets/buzz-owner-pubkey` | **Auto-generated on first `up`** — your identity, reused by every box |
 | `secrets/buzz-owner-nsec-hex` | The private half of the above. **Back this up.** Lose it, lose your relays |
 
@@ -61,30 +62,39 @@ insists on `nsec1…`, convert the hex with any Nostr key tool). You are the rel
 
 ## Connect your agents
 
-### The built-in Claude agent
+### The built-in agents
 
-`devbox up` deploys one agent as a systemd service on the box. It works like a teammate, not a bot:
+`devbox up` deploys **two** agents as systemd services on the box — `claude` and `codex`. They work like
+teammates, not bots:
 
 ```
-you @mention it in a channel  →  buzz-acp  →  claude-agent-acp  →  Claude Code
-                                    ↑                                  │
-                                    └────── buzz-cli posts the reply ──┘
+you @mention one in a channel  →  buzz-acp  →  claude-agent-acp  →  Claude Code
+                                     ↑         codex-acp        →  Codex
+                                     └────── buzz-cli posts the reply ──┘
 ```
 
-`buzz-acp` holds the agent's **own** keypair (generated on the box, kept `0600` under the devbox user), authenticates
-to the relay with it, and was admitted to the closed relay as a member — see
-[`ansible/roles/buzz_agent`](ansible/roles/buzz_agent) for the exact admission call. Its Claude credential is the
-`claude-code-oauth-token` you stashed; the ansible role writes it into a `0600` environment file.
+Each holds its **own** keypair (generated on the box, kept `0600` under the devbox user), authenticates to the
+relay with it, and was admitted to the closed relay as a member — see
+[`ansible/roles/buzz_agent`](ansible/roles/buzz_agent) for the exact admission call. Credentials come from your
+stash: `claude-code-oauth-token` lands in a `0600` environment file, `codex-auth-json` in `~/.codex/auth.json`
+(codex has no env-var path for a ChatGPT login).
+
+**The first time an agent appears it DMs you** with its name and pubkey, so you always know who is on the box
+and what to add to a channel.
 
 ```bash
 ssh root@mybox.dev.example.com
-systemctl status buzz-agent      # is it alive
-journalctl -u buzz-agent -f      # what is it doing
-systemctl restart buzz-agent     # turn it off and on again
+systemctl status 'buzz-agent@*'   # are they alive
+journalctl -u buzz-agent@codex -f # what is one doing
+systemctl restart buzz-agent@claude
 ```
 
-If the agent goes quiet, it is almost always the token: check `journalctl` first, then re-run `devbox up mybox`
-after refreshing `secrets/claude-code-oauth-token`.
+If an agent goes quiet, it is almost always the credential: check `journalctl` first, then re-run
+`devbox up mybox` after refreshing the stashed token.
+
+Want a third brain (goose, or your own)? Add one line to `buzz_agents` in
+[`ansible/roles/buzz_agent/defaults/main.yml`](ansible/roles/buzz_agent/defaults/main.yml) — name, npm package,
+adapter binary — and re-run `devbox up`. Existing agents keep their identities.
 
 ### Add another agent, from any machine
 

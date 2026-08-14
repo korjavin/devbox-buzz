@@ -1,5 +1,5 @@
 [Unit]
-Description=buzz-acp harness (Claude Code agent on the local buzz relay)
+Description=buzz-acp harness (%i agent on the local buzz relay)
 Documentation=https://github.com/block/buzz/tree/main/crates/buzz-acp
 # The relay runs in Docker on this host and is reached over loopback.
 After=network-online.target docker.service
@@ -9,12 +9,14 @@ Wants=network-online.target
 User={{ devbox_user }}
 Group={{ devbox_user }}
 WorkingDirectory={{ buzz_agent_workspace }}
-EnvironmentFile={{ buzz_agent_config_dir }}/env
+# %i is the agent name: one unit template, one config dir per agent.
+EnvironmentFile={{ devbox_user_home }}/.config/buzz-agent-%i/env
 # ~/.local/bin holds buzz-acp, the buzz CLI the agent replies with, and the
-# npm globals (claude-agent-acp, claude). systemd gives services a minimal PATH.
+# npm globals (claude-agent-acp, codex-acp, claude, codex). systemd gives
+# services a minimal PATH.
 Environment=PATH={{ devbox_user_home }}/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart={{ devbox_user_home }}/.local/bin/buzz-acp
-# The relay may still be starting, or Claude may be rate-limited: keep retrying.
+# The relay may still be starting, or the model may be rate-limited: keep retrying.
 Restart=on-failure
 RestartSec=10s
 
