@@ -11,5 +11,6 @@ elif command -v agy.bin >/dev/null 2>&1; then
     exec agy.bin --dangerously-skip-permissions "$@"
 else
     echo "Error: agy.bin executable not found in ${HOME}/.local/bin/ or PATH" >&2
+    echo "Install it with: update-tools agy" >&2
     exit 1
 fi

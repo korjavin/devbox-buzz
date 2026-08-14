@@ -117,17 +117,26 @@ update_cloudflared() {
 
 update_agy() {
     print_header "Antigravity CLI (agy)"
-    if command -v agy >/dev/null 2>&1; then
+    # The real CLI lives as agy.bin because the YOLO wrapper owns the "agy" name.
+    if [ -x "${LOCAL_BIN}/agy.bin" ]; then
         log_info "Updating agy..."
-        if command -v agy.bin >/dev/null 2>&1; then
-            agy.bin update
-        else
-            agy update
-        fi
-        log_success "agy update finished!"
+        "${LOCAL_BIN}/agy.bin" update
     else
-        log_warn "agy CLI not found in PATH."
+        # https://antigravity.google/docs/cli/install - installer names the binary
+        # "agy", so stage it in ~/.local/lib and move it to agy.bin.
+        log_info "Installing agy from antigravity.google..."
+        AGY_STAGE="${HOME}/.local/lib/antigravity"
+        mkdir -p "$LOCAL_BIN" || return 1
+        if ! curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir "$AGY_STAGE"; then
+            log_error "Failed to install agy."
+            return 1
+        fi
+        if ! mv -f "${AGY_STAGE}/agy" "${LOCAL_BIN}/agy.bin"; then
+            log_error "Installer left no binary at ${AGY_STAGE}/agy"
+            return 1
+        fi
     fi
+    log_success "agy is at $("${LOCAL_BIN}/agy.bin" --version 2>&1 | head -n 1)"
 }
 
 update_ralphex() {
