@@ -1,0 +1,134 @@
+---
+# One agent from `buzz_agents`, looped in from main.yml as `agent`.
+- name: Bind the paths for {{ agent.name }}
+  set_fact:
+    # 0700: holds this agent's Nostr secret key and the harness environment.
+    agent_dir: "{{ devbox_user_home }}/.config/buzz-agent-{{ agent.name }}"
+    agent_unit: "buzz-agent@{{ agent.name }}"
+
+- name: Create {{ agent.name }}'s config directory
+  file:
+    path: "{{ agent_dir }}"
+    state: directory
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: '0700'
+
+# The ACP adapter buzz-acp spawns. The CLIs behind them (claude, codex) come
+# from roles/devtools.
+- name: Install the {{ agent.name }} ACP adapter
+  npm:
+    name: "{{ agent.adapter_npm }}"
+    global: yes
+    state: latest
+  become_user: "{{ devbox_user }}"
+  notify: Restart buzz agents
+
+- name: Check for an existing keypair for {{ agent.name }}
+  stat:
+    path: "{{ agent_dir }}/secret_key"
+  register: agent_secret_key
+
+# Settle, don't regenerate: a new keypair would be a new identity, losing the
+# agent's relay membership, DMs and history.
+- name: Generate {{ agent.name }}'s Nostr keypair
+  command: docker exec {{ relay_container.stdout }} buzz-admin generate-key
+  register: generated_key
+  when: not agent_secret_key.stat.exists
+  no_log: yes
+
+- name: Persist {{ agent.name }}'s Nostr keypair
+  copy:
+    content: "{{ generated_key.stdout_lines | select('search', item.match) | first | split | last }}"
+    dest: "{{ agent_dir }}/{{ item.name }}"
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { name: 'public_key', match: '^Public key', mode: '0644' }
+    - { name: 'secret_key', match: '^Secret key', mode: '0600' }
+  loop_control:
+    label: "{{ item.name }}"
+  when: not agent_secret_key.stat.exists
+  no_log: yes
+  notify: Restart buzz agents
+
+- name: Read back {{ agent.name }}'s keys
+  slurp:
+    src: "{{ agent_dir }}/{{ item }}"
+  register: agent_keys
+  loop:
+    - public_key
+    - secret_key
+  no_log: yes
+
+- name: Bind {{ agent.name }}'s keys for the tasks below
+  set_fact:
+    buzz_agent_pubkey: "{{ (agent_keys.results | selectattr('item', 'equalto', 'public_key') | first).content | b64decode | trim }}"
+    buzz_agent_privkey: "{{ (agent_keys.results | selectattr('item', 'equalto', 'secret_key') | first).content | b64decode | trim }}"
+  no_log: yes
+
+# Closed relay (BUZZ_REQUIRE_RELAY_MEMBERSHIP): only pubkeys in the
+# relay_members table may connect. RELAY_OWNER_PUBKEY is seeded at relay
+# startup; every other pubkey — including this agent — is admitted with
+# buzz-admin add-member, which writes the row and publishes the kind:13534
+# NIP-43 roster. Idempotent: a second run prints "already a member".
+- name: Admit {{ agent.name }}'s pubkey to the closed relay
+  command: >-
+    docker exec {{ relay_container.stdout }} buzz-admin add-member
+    --pubkey {{ buzz_agent_pubkey }}
+    --role {{ buzz_agent_relay_role }}
+  register: add_member
+  changed_when: "'added' in add_member.stdout"
+
+# Without a kind:0 profile the agent shows as a bare pubkey in every client.
+# Replaceable event, so republishing on re-runs is harmless; the marker file
+# just avoids the relay round-trip on converges.
+- name: Publish {{ agent.name }}'s profile (display name)
+  become_user: "{{ devbox_user }}"
+  shell: >-
+    BUZZ_RELAY_URL={{ buzz_relay_url }}
+    BUZZ_PRIVATE_KEY=$(cat {{ agent_dir }}/secret_key)
+    {{ devbox_user_home }}/.local/bin/buzz users set-profile
+    --name "{{ agent.name }}"
+    --about "{{ agent.about }}"
+    && touch {{ agent_dir }}/.profile_published
+  args:
+    creates: "{{ agent_dir }}/.profile_published"
+
+- name: Install {{ agent.name }}'s harness environment file
+  template:
+    src: buzz-agent.env.j2
+    dest: "{{ agent_dir }}/env"
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: '0600'
+  no_log: yes
+  notify: Restart buzz agents
+
+- name: Enable and start {{ agent_unit }}
+  systemd:
+    name: "{{ agent_unit }}"
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+# How the owner learns a new agent exists and what its pubkey is. `dms open`
+# is idempotent on the relay (it returns the existing conversation), the marker
+# file is what keeps it to one message per agent.
+- name: Introduce {{ agent.name }} to the owner over DM
+  become_user: "{{ devbox_user }}"
+  shell: |
+    set -euo pipefail
+    export BUZZ_RELAY_URL={{ buzz_relay_url }}
+    export BUZZ_PRIVATE_KEY=$(cat {{ agent_dir }}/secret_key)
+    BIN={{ devbox_user_home }}/.local/bin
+    dm=$($BIN/buzz dms open --pubkey {{ buzz_relay_owner_pubkey }} |
+         python3 -c 'import json,sys; print(json.load(sys.stdin)["dm_id"])')
+    $BIN/buzz messages send --channel "$dm" --content \
+      "Hi, I am {{ agent.name }}, an agent running on this box. My pubkey is {{ buzz_agent_pubkey }} — mention me in a channel after adding me to it: buzz channels add-member --channel <uuid> --pubkey {{ buzz_agent_pubkey }} --role bot"
+    touch {{ agent_dir }}/.intro_sent
+  args:
+    creates: "{{ agent_dir }}/.intro_sent"
+    executable: /bin/bash
+  when: buzz_relay_owner_pubkey | length > 0

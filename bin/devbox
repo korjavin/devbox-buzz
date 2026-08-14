@@ -168,7 +168,7 @@ load_config() {
 }
 
 cmd_up() {
-  local acme_email owner_pubkey oauth_token ip i n inv
+  local acme_email owner_pubkey oauth_token codex_auth ip i n inv codex_vars
   local agent_args=()
   load_config
   acme_email="$(stash_get_or_die secrets/acme-email)"
@@ -180,6 +180,19 @@ cmd_up() {
     agent_args=(-e "claude_code_oauth_token=$oauth_token")
   else
     info "no secrets/claude-code-oauth-token stashed -- deploying the relay without the built-in agent"
+  fi
+
+  # The codex agent's credential is a whole ~/.codex/auth.json (a `codex login`
+  # artifact -- multi-line JSON with quotes), so it goes through a temp vars
+  # FILE rather than -e key=value, which mangles both.
+  codex_auth="$(stash_get secrets/codex-auth-json)"
+  if [[ -n "$codex_auth" ]]; then
+    codex_vars="$(mktemp)"
+    printf '%s' "$codex_auth" |
+      python3 -c 'import json,sys; json.dump({"codex_auth_json": sys.stdin.read()}, sys.stdout)' > "$codex_vars"
+    agent_args+=(-e "@$codex_vars")
+  else
+    info "no secrets/codex-auth-json stashed -- the codex agent will start but cannot authenticate"
   fi
 
   [[ -f "$KEY" ]] || { info "generating $KEY"; ssh-keygen -t ed25519 -f "$KEY" -N "" -C "$NAME" -q; }
@@ -213,11 +226,11 @@ cmd_up() {
     sleep 10
   done
 
-  inv="$(mktemp)"; trap 'rm -f "$inv"' RETURN
+  inv="$(mktemp)"; trap 'rm -f "$inv" "${codex_vars:-}"' RETURN
   printf '[devbox]\n%s ansible_host=%s ansible_user=root ansible_ssh_private_key_file=%s\n' \
     "$NAME" "$ip" "$KEY" > "$inv"
 
-  info "ansible: toolchain, buzz relay, Claude agent"
+  info "ansible: toolchain, buzz relay, agents"
   ansible-playbook -i "$inv" "$ANSIBLE_DIR/playbook.yml" \
     -e devbox_user=devbox \
     -e "acme_email=$acme_email" \
@@ -268,9 +281,12 @@ cmd_check() {
     "$("${CURL[@]}" -o /dev/null -w '%{http_code}' -m 30 "https://$BUZZ_HOST/_liveness" || echo 000)" "200"
 
   if [[ -n "$(stash_get secrets/claude-code-oauth-token)" ]]; then
+    # One buzz-agent@<name> instance per agent, so ask systemd which instances
+    # are enabled rather than hardcoding the roster twice.
     unit="$(ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=10 "root@$ip" \
-      'systemctl is-active buzz-agent' 2>/dev/null || echo unreachable)"
-    check_one "buzz-agent unit" "$unit" "active"
+      'systemctl is-active $(ls /etc/systemd/system/multi-user.target.wants |
+         grep "^buzz-agent@") | sort -u | paste -sd,' 2>/dev/null || echo unreachable)"
+    check_one "buzz agent units" "$unit" "active"
   fi
 
   [[ $fail -eq 0 ]] || die "checks failed for $NAME"

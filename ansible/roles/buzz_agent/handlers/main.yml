@@ -1,6 +1,12 @@
 ---
-- name: Restart buzz agent
+# Handlers cannot see the per-agent loop var, so anything that changes for one
+# agent restarts them all. Restarts are cheap here (the harness reconnects) and
+# a converge with nothing changed fires no handler at all.
+- name: Restart buzz agents
   systemd:
-    name: "{{ buzz_agent_service_name }}"
+    name: "buzz-agent@{{ item.name }}"
     state: restarted
     daemon_reload: yes
+  loop: "{{ buzz_agents }}"
+  loop_control:
+    label: "{{ item.name }}"
