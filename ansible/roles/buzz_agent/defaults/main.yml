@@ -26,6 +26,10 @@ buzz_relay_owner_pubkey: "{{ buzz_owner_pubkey | default('') }}"
 # the connection on-box; the cert must be production LE (rustls webpki roots).
 buzz_relay_url: "wss://{{ buzz_host }}"
 
+# kind:0 profile published for the agent so clients show a name, not a pubkey.
+buzz_agent_display_name: "claude"
+buzz_agent_about: "Claude Code agent on this box (buzz-acp host runner). @mention me with a task."
+
 # How the relay container is found for the buzz-admin calls (keygen +
 # add-member). Compose labels rather than a container name: upstream's bundle
 # sets `name: buzz-prod` and no container_name, so the name is generated.

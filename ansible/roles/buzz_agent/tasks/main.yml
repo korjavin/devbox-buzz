@@ -166,6 +166,21 @@
   register: add_member
   changed_when: "'added' in add_member.stdout"
 
+# Without a kind:0 profile the agent shows as a bare pubkey in every client.
+# Replaceable event, so republishing on re-runs is harmless; the marker file
+# just avoids the relay round-trip on converges.
+- name: Publish the agent's profile (display name)
+  become_user: "{{ devbox_user }}"
+  shell: >-
+    BUZZ_RELAY_URL={{ buzz_relay_url }}
+    BUZZ_PRIVATE_KEY=$(cat {{ buzz_agent_config_dir }}/secret_key)
+    {{ devbox_user_home }}/.local/bin/buzz users set-profile
+    --name "{{ buzz_agent_display_name }}"
+    --about "{{ buzz_agent_about }}"
+    && touch {{ buzz_agent_config_dir }}/.profile_published
+  args:
+    creates: "{{ buzz_agent_config_dir }}/.profile_published"
+
 # --- service ---------------------------------------------------------------
 - name: Install the harness environment file
   template:
