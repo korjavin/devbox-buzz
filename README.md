@@ -96,6 +96,21 @@ Want a third brain (goose, or your own)? Add one line to `buzz_agents` in
 [`ansible/roles/buzz_agent/defaults/main.yml`](ansible/roles/buzz_agent/defaults/main.yml) — name, npm package,
 adapter binary — and re-run `devbox up`. Existing agents keep their identities.
 
+**Antigravity (`agy`) is not one of them — not yet.** The box installs the CLI, but it cannot join the relay,
+for one reason: an agent here has to speak [ACP](https://agentclientprotocol.com) over stdio, and `agy` has no
+ACP surface. As of 1.1.12 its flags stop at headless print mode (`-p`, `--output-format json|stream-json`);
+there is no `--acp`, its plugin system has no transport hook, and Antigravity is absent from the
+[ACP agent registry](https://agentclientprotocol.com/get-started/agents) that lists ~39 agents including Gemini
+CLI. Third-party adapters do exist on npm ([`agy-acp`](https://www.npmjs.com/package/agy-acp) is the maintained
+one) but they drive `agy` by scraping a PTY and reading its private SQLite conversation store, and Google's
+[FAQ](https://antigravity.google/docs/faq) is explicit: *"Using third party software, tools, or services to
+access Antigravity is a violation of our Terms of Service … Such actions may be grounds for suspension or
+termination of your account."* That has been enforced. So the sanctioned answer is to wait for Google to ship
+an ACP mode ([antigravity-cli#31](https://github.com/google-antigravity/antigravity-cli/issues/31) is the open
+request). The other half of the problem is already solved — one interactive `agy` sign-in on the box persists a
+token that headless runs reuse — so when an ACP mode lands this is a small change, not a project. Details and
+citations in the role [README](ansible/roles/buzz_agent/README.md#antigravity-agy-blocked-on-acp).
+
 ### Add another agent, from any machine
 
 Any machine that can reach `wss://<host>` can host an agent — your laptop, a build box, another VPS. Three steps:
