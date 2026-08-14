@@ -189,6 +189,43 @@ The catalog and detection order are in
 [`desktop/src-tauri/src/managed_agents/discovery.rs`](https://github.com/block/buzz/blob/main/desktop/src-tauri/src/managed_agents/discovery.rs)
 (`KNOWN_ACP_RUNTIMES`, `resolve_command`) in [block/buzz](https://github.com/block/buzz).
 
+### Native git against the relay
+
+Your relay is also a git host. `git clone`/`push` work over plain HTTPS with **no password and no SSH key** —
+the credential helper signs each request with your Nostr key ([NIP-98](https://github.com/nostr-protocol/nips/blob/master/98.md)),
+and the ACL is membership in the channel the repo is bound to:
+
+```bash
+buzz repos create --id myrepo --channel <channel uuid>   # announce + bind; unbound repos 404 for everyone
+```
+
+Repo URLs are `https://<host>/git/<owner pubkey hex>/<repo id>` — the **owner's** pubkey, not yours.
+
+The box already has all of this (`ansible/roles/devtools`). On your own machine:
+
+```bash
+# 1. git >= 2.46 — the helper needs the credential protocol's `authtype` capability.
+#    Ubuntu <= 24.04 ships 2.43: sudo add-apt-repository ppa:git-core/ppa && sudo apt install git
+git version
+
+# 2. The helper. Cargo-only upstream; with no Rust toolchain, build it in a container like the box does:
+docker run --rm -v "$PWD:/out" rust:1-slim \
+  cargo install --git https://github.com/block/buzz --locked --root /out git-credential-nostr
+install -m 0755 bin/git-credential-nostr ~/.local/bin/
+
+# 3. Point git at it. useHttpPath is required — the helper builds the NIP-98 `u` tag from the repo path.
+git config --global credential.helper nostr
+git config --global credential.useHttpPath true
+
+# 4. Your key: $NOSTR_PRIVATE_KEY (hex or nsec1) wins over the `nostr.keyfile` config.
+export NOSTR_PRIVATE_KEY=$(kv get secrets/buzz-owner-nsec-hex)
+git clone https://mybox.dev.example.com/git/<owner pubkey>/myrepo
+```
+
+The agents get step 4 for free: `NOSTR_PRIVATE_KEY` is in their environment file alongside `BUZZ_PRIVATE_KEY`,
+so each agent pushes as **itself** — its own key, its own channel memberships, its own commits. Nothing is
+shared, and an agent can only reach the repos whose channel it was added to.
+
 ---
 
 ## Threat model

@@ -24,6 +24,24 @@ beads_version: "latest"
 ralphex_version: "latest"
 revdiff_version: "latest"
 
+# --- native git against the buzz relay ------------------------------------
+# The relay's smart-HTTP git endpoint authenticates with NIP-98, signed by
+# git-credential-nostr. That helper needs the credential protocol's `authtype`
+# capability, i.e. git >= 2.46; noble ships 2.43, so the git-core PPA does the
+# lifting. Set to false on a distro that already ships a new enough git.
+git_core_ppa: yes
+
+# git-credential-nostr is cargo-only upstream (no crates.io, no release asset).
+# Pinned to the same commit stacks/buzz is vendored from, so client and relay
+# agree. bump: move stacks/buzz first, then this.
+git_credential_nostr_rev: "0571f5455b1b2aeea7334082f0df9d1f19b22f7d"
+# What "already built" means for the build task — rev in the name so a bumped
+# pin rebuilds instead of silently keeping the old binary.
+git_credential_nostr_stamp: "{{ devbox_user_home }}/.local/lib/git-credential-nostr-{{ git_credential_nostr_rev[:12] }}.built"
+# Throwaway container that compiles it — nothing of it survives but the binary,
+# which is the whole point: no Rust toolchain on the box.
+rust_build_image: "rust:1-slim"
+
 # Global npm packages: name -> version. "latest" means unpinned.
 # Current upstream at time of writing: claude-code 2.1.223, codex 0.146.1,
 # jules 0.1.42, wrangler 4.119.0, pnpm 11.20.0

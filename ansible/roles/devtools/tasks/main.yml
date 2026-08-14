@@ -139,3 +139,68 @@
     - { src: "{{ playbook_dir }}/../bin/update-tools", dest: "{{ devbox_user_home }}/.local/bin/update-tools" }
     - { src: "{{ playbook_dir }}/../bin/agy", dest: "{{ devbox_user_home }}/.local/bin/agy" }
     - { src: "{{ playbook_dir }}/../bin/kv", dest: "{{ devbox_user_home }}/.local/bin/kv" }
+
+# --- native git against the buzz relay (see README) -------------------------
+# apt_repository is deprecated (removal in ansible-core 2.25) but it is the only
+# module that still understands the `ppa:` shorthand — deb822_repository wants
+# the launchpad URL and signing key spelled out by hand. Swap it when it breaks.
+- name: Add the git-core PPA (noble's git 2.43 is too old for NIP-98 auth)
+  apt_repository:
+    repo: ppa:git-core/ppa
+    state: present
+  when: git_core_ppa
+
+- name: Upgrade git
+  apt:
+    name: git
+    state: latest
+    update_cache: yes
+  when: git_core_ppa
+
+- name: Verify git is new enough for the credential authtype capability
+  command: git version
+  register: git_version
+  changed_when: false
+  failed_when: git_version.stdout.split()[2] is version('2.46', '<')
+
+# Upstream distributes the helper as a crate only, and a Rust toolchain on the
+# box would be a GB of build cruft the devbox never uses again. Docker is
+# already here (roles/docker): build in a throwaway container, keep the binary.
+# The empty stamp file carries the rev, so `creates` makes every later run free
+# but a bumped pin still rebuilds (the binary alone would freeze every box on
+# whatever it built first).
+- name: Build git-credential-nostr in a throwaway rust container
+  shell: |
+    set -euo pipefail
+    build=$(mktemp -d)
+    trap 'rm -rf "$build"' EXIT
+    docker run --rm -v "$build:/out" {{ rust_build_image }} \
+      cargo install --git https://github.com/block/buzz \
+      --rev {{ git_credential_nostr_rev }} --locked --root /out git-credential-nostr
+    own="-o {{ devbox_user }} -g {{ devbox_user }}"
+    install $own -m 0755 "$build/bin/git-credential-nostr" {{ devbox_user_home }}/.local/bin/
+    install $own -d {{ devbox_user_home }}/.local/lib
+    install $own -m 0644 /dev/null {{ git_credential_nostr_stamp }}
+  args:
+    executable: /bin/bash
+    creates: "{{ git_credential_nostr_stamp }}"
+
+# useHttpPath is not optional: the helper needs the repo path to build the
+# NIP-98 `u` tag, and refuses without it. `git config` is not idempotent by
+# itself, hence the read-before-write (community.general.git_config would do
+# this, but nothing else in this playbook needs the collection).
+# If your yadm dotfiles ship a ~/.gitconfig they win until the next converge,
+# which puts these two keys back.
+- name: Point the devbox user's git at the nostr credential helper
+  become_user: "{{ devbox_user }}"
+  shell: |
+    set -eu
+    out=
+    for kv in credential.helper=nostr credential.useHttpPath=true; do
+      k=${kv%%=*}; v=${kv#*=}
+      [ "$(git config --global --get "$k" || true)" = "$v" ] ||
+        { git config --global "$k" "$v"; out=changed; }
+    done
+    echo "${out:-ok}"
+  register: git_relay_config
+  changed_when: git_relay_config.stdout == 'changed'
