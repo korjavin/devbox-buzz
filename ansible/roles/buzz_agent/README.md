@@ -113,6 +113,83 @@ box, and re-pushing the stashed copy would roll it back to an expired one.
 (`OPENAI_API_KEY` also works if that is the credential you have; put it in the
 env template instead.)
 
+## Antigravity (agy): blocked on ACP
+
+`agy` is installed on the box by `roles/devtools`, but it is deliberately **not**
+in `buzz_agents`. What this role needs from an agent is an ACP server on stdio;
+`agy` does not have one, and no sanctioned adapter provides one.
+
+Verified on buzztest against agy **1.1.12** (2026-08-14):
+
+* `agy --help` lists no `--acp` / `--experimental-acp`. Headless is print mode
+  only: `-p/--print`, `--output-format text|json|stream-json`, `--json-schema`,
+  `--mode`, `--dangerously-skip-permissions`. Request/response, not a session
+  protocol.
+* `agy plugin` does `import|install|enable|disable|validate` for gemini/claude
+  style plugins — no transport or server hook. `agy plugin list` on the box:
+  "No imported plugins".
+* The 1.1.11/1.1.12 changelogs (`agy changelog`) never mention ACP, the Agent
+  Client Protocol, or JSON-RPC stdio.
+* Antigravity is not in the [ACP agent registry](https://agentclientprotocol.com/get-started/agents)
+  (~39 agents, Gemini CLI among them), and not in buzz desktop's own
+  `KNOWN_ACP_RUNTIMES` (goose, claude, codex, buzz-agent) or its preset
+  harnesses (devin, cursor, omp, grok, opencode, kimi, amp, hermes, openclaw) —
+  `desktop/src-tauri/src/managed_agents/discovery.rs`. `gemini-cli`'s
+  `--experimental-acp` belongs to a different, deprecated binary that does not
+  front Antigravity.
+
+Third-party adapters exist — [`agy-acp`](https://github.com/shindgew/agy-acp)
+(Apache-2.0, published 0.5.0, pushed 2026-08-13) is the maintained one;
+`antigravity-acp` and `agy-acp-bridge` are stale. We are not using them, for two
+independent reasons:
+
+1. **Terms of Service.** Google's [FAQ](https://antigravity.google/docs/faq):
+   *"Using third party software, tools, or services to access Antigravity is a
+   violation of our Terms of Service … Such actions may be grounds for
+   suspension or termination of your account."* Enforcement has already happened
+   in the wild (the OpenClaw ban wave). The account at risk is the owner's.
+   Google's own recommendation for third-party agents is a Vertex / AI Studio
+   Gemini API key, which is a different product than Antigravity.
+2. **It is a reverse-engineering wrapper.** `agy-acp` spawns `agy` in a PTY,
+   treats its stdout as a diagnostic tail, and reads answers out of agy's
+   private protobuf SQLite store under
+   `~/.gemini/antigravity-cli/conversations/`. No forward-compatibility
+   guarantee, and its open issue
+   [#105](https://github.com/shindgew/agy-acp/issues/105) is a turn-hang on
+   agy 1.1.12 — exactly the version we run.
+
+**What unblocks this:** Google shipping a stdio JSON-RPC ACP mode in
+antigravity-cli — the open request is
+[antigravity-cli#31](https://github.com/google-antigravity/antigravity-cli/issues/31)
+(no response yet) — and registering it on the ACP registry. Revisit then: a
+built-in `agy acp` would still need a small role change first, because
+`tasks/agent.yml` installs `agent.adapter_npm` unconditionally and an ACP-native
+CLI has no npm adapter to install.
+
+### The auth half already works
+
+The other half of the question is settled, so nothing else has to be solved
+later. `agy` demands an interactive sign-in on first use, but that sign-in
+persists and a non-interactive process reuses it. **One manual step, once per
+box:**
+
+```bash
+ssh root@<host>
+su - devbox -c agy        # follow the browser device flow, then quit
+```
+
+It writes `~devbox/.gemini/antigravity-cli/antigravity-oauth-token` (0600) plus
+`settings.json`, and after that a headless run works with no TTY and no
+interaction — verified on buzztest:
+
+```console
+$ su - devbox -c 'agy -p "What is 6 times 7? Answer with the number only." --output-format json' < /dev/null
+{"conversation_id":"bf716b00-…","status":"SUCCESS","response":"42\n","duration_seconds":2.16,…}
+```
+
+So a systemd unit under `devbox` would pick the credential up. Only the ACP
+surface is missing.
+
 ## Who the agents listen to
 
 `buzz-acp`'s author gate defaults to `owner-only`, and **an agent with no
