@@ -56,6 +56,25 @@
     # append with no groups is a module error, so it tracks devbox_user_sudo
     append: "{{ devbox_user_sudo | bool }}"
 
+# Terraform installs the provisioning key for root only; mirror it so the
+# operator can ssh/mosh in as the dev user directly.
+- name: Ensure {{ devbox_user }} has an .ssh directory
+  file:
+    path: "/home/{{ devbox_user }}/.ssh"
+    state: directory
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: '0700'
+
+- name: Mirror root's authorized_keys to {{ devbox_user }}
+  copy:
+    src: /root/.ssh/authorized_keys
+    remote_src: yes
+    dest: "/home/{{ devbox_user }}/.ssh/authorized_keys"
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: '0600'
+
 # SSH hardening (issue #4). Key-only from Terraform onwards, so killing password
 # auth locks nobody out. Set harden_ssh: false to skip.
 - name: Install fail2ban
