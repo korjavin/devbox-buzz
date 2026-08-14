@@ -110,6 +110,24 @@
     mv -f {{ devbox_user_home }}/.local/bin/app {{ devbox_user_home }}/.local/bin/revdiff
   become_user: "{{ devbox_user }}"
 
+# https://antigravity.google/docs/cli/install - the only distribution channel
+# (no npm package, no GitHub release); the installer verifies its own sha512.
+# It always names the binary "agy", but the YOLO wrapper below owns that name in
+# ~/.local/bin, so stage the install in ~/.local/lib and move the real binary to
+# agy.bin - which is what the wrapper execs. The installer also appends a PATH
+# line for its --dir to the shell profiles; after the move that points at an
+# empty dir, so it cannot shadow the wrapper.
+# No version knob: the installer only serves latest and the CLI self-updates.
+- name: Install Antigravity CLI (agy) as agy.bin
+  shell: |
+    set -o pipefail
+    curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir "{{ devbox_user_home }}/.local/lib/antigravity" &&
+    mv -f "{{ devbox_user_home }}/.local/lib/antigravity/agy" "{{ devbox_user_home }}/.local/bin/agy.bin"
+  args:
+    executable: /bin/bash
+    creates: "{{ devbox_user_home }}/.local/bin/agy.bin"
+  become_user: "{{ devbox_user }}"
+
 - name: Install update-tools and agy wrapper scripts to ~/.local/bin
   copy:
     src: "{{ item.src }}"
