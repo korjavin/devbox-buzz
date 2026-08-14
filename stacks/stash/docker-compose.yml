@@ -1,0 +1,26 @@
+# On-box secret storage for the agents. Adapted from devbox-infra's
+# stacks/core-infra/docker-compose.yml (the stash service, nothing else).
+#
+# Deliberately its own compose project, not part of stacks/buzz: the relay and
+# the secret store share nothing, and `devbox down`-ing one should not take the
+# other with it.
+#
+# Not routed through anything: access control IS the 127.0.0.1 bind below.
+# bin/kv talks to http://127.0.0.1:8080 from the host only.
+services:
+  stash:
+    image: umputun/stash:master
+    container_name: stash
+    restart: unless-stopped
+    environment:
+      - APP_UID=1000
+      - STASH_DB=/srv/data/stash.db
+      - STASH_SECRETS_KEY=${STASH_SECRETS_KEY:?stash secrets key required}
+    volumes:
+      - stash_data:/srv/data
+    ports:
+      - "127.0.0.1:${STASH_PORT:-8080}:8080"
+
+volumes:
+  stash_data:
+    name: stash_data
