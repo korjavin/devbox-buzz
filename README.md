@@ -206,3 +206,26 @@ stacks/buzz/          vendored upstream compose bundle (relay, Postgres, Redis, 
 - The `buzz-postgres-data` and `buzz-minio-data` docker volumes — all message history and uploaded media.
 
 `devbox down` destroys the server, so it destroys all three of the on-box items. Copy them off first if you care.
+
+---
+
+## Secrets on the box
+
+The box runs [stash](https://github.com/umputun/stash) (`stacks/stash/`, deployed by `ansible/roles/stash` to
+`/opt/stash`), bound to `127.0.0.1:8080` and nothing else — no Caddy route, no firewall hole. The loopback bind
+*is* the access control. `bin/kv` is the CLI in front of it, installed to `~/.local/bin/kv`, so agents running on
+the box can read secrets you put there instead of you baking them into env files:
+
+```bash
+kv set secrets/some-api-key "sk-..."   # or: echo -n "$V" | kv set secrets/some-api-key
+kv get secrets/some-api-key
+kv ls secrets/                         # list keys under a prefix
+kv del secrets/some-api-key
+```
+
+This is separate from the *local* stash on your own machine that `bin/devbox` reads provisioning credentials
+from (see [Quickstart](#quickstart)) — same tool, different host, different contents.
+
+**Back up `/opt/stash/.env`.** It holds `STASH_SECRETS_KEY`, which encrypts everything in the `stash_data`
+volume. Ansible settles that key rather than regenerating it, so re-running the playbook is safe — but lose the
+file and every stored secret is gone, unrecoverably. `devbox down` destroys it along with the server.

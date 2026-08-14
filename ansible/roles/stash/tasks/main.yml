@@ -1,0 +1,60 @@
+---
+# Deploys the loopback-only stash secret store (stacks/stash) to {{ stash_dir }}.
+# Adapted from devbox-infra's roles/infra_stacks; the settle-don't-regenerate
+# pattern is the same one roles/buzz uses for its stack secrets.
+
+- name: Ensure the stash stack directory exists
+  file:
+    path: "{{ stash_dir }}"
+    state: directory
+    mode: '0700'
+
+- name: Check whether the stash .env already exists
+  stat:
+    path: "{{ stash_dir }}/.env"
+  register: _stash_env_stat
+
+- name: Read the existing stash .env
+  slurp:
+    src: "{{ stash_dir }}/.env"
+  register: _stash_env_slurp
+  when: _stash_env_stat.stat.exists
+
+# Settled, never regenerated: STASH_SECRETS_KEY is the encryption key for
+# everything already in the stash_data volume. A fresh value on a re-run would
+# orphan every stored secret, unrecoverably.
+- name: Settle STASH_SECRETS_KEY
+  set_fact:
+    _stash_secrets_key: "{{ _found if _found else lookup('password', '/dev/null length=48 chars=ascii_letters,digits') }}"
+  vars:
+    _env_text: "{{ _stash_env_slurp.content | default('') | b64decode }}"
+    _found: "{{ _env_text | regex_search('^STASH_SECRETS_KEY=(.+)$', '\\1', multiline=True) | default([], true) | join }}"
+  no_log: true
+
+- name: Copy the stash compose file
+  copy:
+    src: "{{ playbook_dir }}/../stacks/stash/docker-compose.yml"
+    dest: "{{ stash_dir }}/docker-compose.yml"
+    mode: '0644'
+
+- name: Template the stash .env
+  template:
+    src: env.j2
+    dest: "{{ stash_dir }}/.env"
+    mode: '0600'
+
+- name: Start the stash stack
+  command: docker compose up -d
+  args:
+    chdir: "{{ stash_dir }}"
+  register: _stash_up
+  changed_when: "'Started' in _stash_up.stderr or 'Created' in _stash_up.stderr"
+
+# The check that the loopback publish actually happened -- bin/kv depends on
+# exactly this address, and a container that is "up" but bound elsewhere is
+# indistinguishable from a broken one until an agent tries to read a secret.
+- name: Wait for stash on the host loopback
+  wait_for:
+    host: 127.0.0.1
+    port: "{{ stash_port }}"
+    timeout: "{{ stash_ready_timeout }}"

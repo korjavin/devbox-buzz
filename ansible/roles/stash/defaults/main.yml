@@ -1,0 +1,7 @@
+---
+stash_dir: /opt/stash
+
+# Loopback publish only -- bin/kv defaults to http://127.0.0.1:8080.
+stash_port: 8080
+
+stash_ready_timeout: 60

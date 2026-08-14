@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+#
+# kv - Secret storage CLI helper for umputun/stash
+# Usage: kv get|set|del|ls <key> [value]
+#
+# Copied from devbox-infra/bin/kv. Talks to the loopback-only stash server
+# deployed by ansible/roles/stash (see stacks/stash/docker-compose.yml).
+
+set -e
+
+# Default to local stash server or environment variable
+STASH_URL="${STASH_URL:-http://127.0.0.1:8080}"
+STASH_TOKEN_FILE="${HOME}/stash/.env"
+
+if [ -f "$STASH_TOKEN_FILE" ]; then
+    # Load STASH_TOKEN from config if present
+    # shellcheck disable=SC1090
+    . "$STASH_TOKEN_FILE"
+fi
+
+if [ -z "${STASH_TOKEN:-}" ]; then
+    AUTH_HEADER=()
+else
+    AUTH_HEADER=(-H "Authorization: Bearer $STASH_TOKEN")
+fi
+
+CURL_OPTS=(-sf "${AUTH_HEADER[@]}")
+
+case "${1:-}" in
+  get)
+    if [ -z "${2:-}" ]; then echo "Usage: kv get <key>" >&2; exit 1; fi
+    curl "${CURL_OPTS[@]}" "$STASH_URL/kv/$2"; echo
+    ;;
+  set)
+    if [ -z "${2:-}" ]; then echo "Usage: kv set <key> [value]" >&2; exit 1; fi
+    curl "${CURL_OPTS[@]}" -X PUT --data-binary "${3-$(cat)}" "$STASH_URL/kv/$2" >/dev/null && echo "ok"
+    ;;
+  del)
+    if [ -z "${2:-}" ]; then echo "Usage: kv del <key>" >&2; exit 1; fi
+    curl "${CURL_OPTS[@]}" -X DELETE "$STASH_URL/kv/$2" >/dev/null && echo "ok"
+    ;;
+  ls)
+    curl "${CURL_OPTS[@]}" "$STASH_URL/kv/?prefix=${2-}"; echo
+    ;;
+  *)
+    echo "stash secret storage CLI"
+    echo "Usage: kv get|set|del|ls <key> [value]" >&2
+    exit 1
+    ;;
+esac
