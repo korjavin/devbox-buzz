@@ -15,6 +15,7 @@
     - role: docker
     - role: devtools
     - role: user_dotfiles
+    - role: stash
     - role: buzz
       when: buzz_host | default('') | length > 0
     - role: buzz_agent

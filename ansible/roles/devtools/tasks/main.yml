@@ -138,3 +138,4 @@
   loop:
     - { src: "{{ playbook_dir }}/../bin/update-tools", dest: "{{ devbox_user_home }}/.local/bin/update-tools" }
     - { src: "{{ playbook_dir }}/../bin/agy", dest: "{{ devbox_user_home }}/.local/bin/agy" }
+    - { src: "{{ playbook_dir }}/../bin/kv", dest: "{{ devbox_user_home }}/.local/bin/kv" }
