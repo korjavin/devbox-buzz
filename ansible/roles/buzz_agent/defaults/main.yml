@@ -37,6 +37,24 @@ codex_auth_json: ""
 # the two stay in step without the playbook repeating itself.
 buzz_relay_owner_pubkey: "{{ buzz_owner_pubkey | default('') }}"
 
+# NIP-OA owner attestations, per agent name: {claude: '["auth",...]', ...}.
+# The desktop derives "managed by <owner>" from a valid `auth` tag on the
+# agent's kind:0 — and that tag can only be signed by the OWNER's secret key,
+# which never touches this box. So it is minted on the owner's machine and
+# passed in here; without it the app shows "owner unavailable". See the role
+# README for the one-shot command. Empty = no attestation, agents still work.
+buzz_agent_auth_tags: {}
+
+# --- debug log channels --------------------------------------------------
+# Each agent's journal is forwarded into a private channel `debug-<name>` that
+# the owner owns. The forwarder posts as its own identity (below), not as the
+# agent: the channel is a log sink, and the agents are deliberately not in it.
+buzz_agent_logger_dir: "{{ devbox_user_home }}/.config/buzz-logs"
+# Batch window — a batch is flushed after this many seconds or lines,
+# whichever comes first. Tune for chattiness vs. how live the channel feels.
+buzz_agent_log_flush_seconds: 15
+buzz_agent_log_max_lines: 40
+
 # --- relay ---------------------------------------------------------------
 # Loopback: the relay publishes its HTTP port on 127.0.0.1, so no TLS hop
 # on-box. ws:// is right for both consumers — buzz-acp speaks the websocket,
@@ -71,6 +89,10 @@ buzz_agent_respond_to: "owner-only"
 buzz_agent_respond_to_allowlist: ""
 # Relay role for the agent's pubkey: member or admin (owner is not settable).
 buzz_agent_relay_role: "member"
+# Publish encrypted ACP observer frames (NIP-AO) so the owner can watch the
+# agent's live internals from the desktop. Off upstream; on here, because
+# that is the whole point of a box you own. Set false to stop the stream.
+buzz_agent_relay_observer: true
 
 # Where the agents do their work — their cwd, and what they can see. Shared on
 # purpose: they are teammates on one box, not tenants.

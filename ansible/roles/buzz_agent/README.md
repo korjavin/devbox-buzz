@@ -74,7 +74,10 @@ Each keypair is generated once and persisted, per agent:
 | `~/.config/buzz-agent-<name>/secret_key` | 0600 | agent Nostr private key (hex) |
 | `~/.config/buzz-agent-<name>/public_key` | 0644 | agent Nostr pubkey (hex) — mention this to talk to it |
 | `~/.config/buzz-agent-<name>/env` | 0600 | systemd `EnvironmentFile`: private key + credentials |
+| `~/.config/buzz-agent-<name>/auth_tag` | 0644 | NIP-OA owner attestation (public) |
+| `~/.config/buzz-agent-<name>/debug_channel` | 0644 | id of this agent's `debug-<name>` channel |
 | `~/.config/buzz-agent-<name>/.profile_published`, `.intro_sent` | 0644 | one-shot markers |
+| `~/.config/buzz-logs/{secret,public}_key` | 0600/0644 | the log forwarder's own identity |
 
 Re-running the role never regenerates a keypair: a new key would be a new
 identity and would lose that agent's membership, DMs and history. To rotate,
@@ -86,6 +89,168 @@ migrates that layout in place — unit stopped and removed, directory *moved* to
 `~/.config/buzz-agent-claude` — so the pubkey survives. That migration runs
 before the per-agent tasks on purpose: an empty config dir would mint a new
 identity.
+
+## Owner attribution: the app's "owner unavailable"
+
+Buzz Desktop labels every agent message with who owns the agent, and shows
+**"owner unavailable"** when it cannot work that out
+(`desktop/src/features/messages/ui/MessageAgentOwner.tsx:45`, rendered for any
+author with `isAgent` — including a plain `bot`-role channel member). What it
+reads is **not** a profile field and not relay metadata: it is a valid NIP-OA
+`auth` tag on the agent's own kind:0 event
+(`desktop/src-tauri/src/nostr_convert.rs:58-84`,
+`profile_valid_oa_owner_pubkey` → `nip_oa::verify_auth_tag`).
+
+The tag is
+
+```json
+["auth", "<owner-pubkey-hex>", "<conditions>", "<sig-hex>"]
+```
+
+where the signature is BIP-340 Schnorr over
+`SHA256("nostr:agent-auth:" + <agent-pubkey-hex> + ":" + <conditions>)`, **made
+with the owner's secret key** (`crates/buzz-sdk/src/nip_oa.rs:109-116, 146-166`).
+Self-attestation is rejected on both mint and verify (`nip_oa.rs:152-156`,
+`:216-220`), so **the box cannot produce this itself** — the owner's key must
+never live here. The role therefore takes the finished tag as input:
+
+```yaml
+buzz_agent_auth_tags:
+  claude: '["auth","<owner_hex>","","<sig_hex>"]'
+  codex:  '["auth","<owner_hex>","","<sig_hex>"]'
+```
+
+**One-shot command for the owner, on the owner's own machine** (needs a
+checkout of block/buzz and a rust toolchain; `conditions` stays empty — the
+desktop does not evaluate conditions but `buzz users get --owner me` reports
+`condition_mismatch` for anything else):
+
+```bash
+cargo run -p buzz-sdk --release --example compute_auth_tag -- \
+  "$(kv get secrets/buzz-owner-nsec-hex)" <agent_pubkey_hex> ""
+# -> ["auth","<owner_hex>","","<sig_hex>"]   (one per agent pubkey)
+```
+
+Agent pubkeys are in `~devbox/.config/buzz-agent-<name>/public_key`. Feed the
+results back as `-e '{"buzz_agent_auth_tags": {...}}'` (stash them, e.g.
+`kv put secrets/buzz-auth-tag-claude`). The tag is public data — it is
+published in the kind:0 — so it does not need vault treatment.
+
+### The trade-off: it hides the agent from the @mention picker
+
+**`buzz_agent_auth_tags` is empty by default, and that is deliberate.** A valid
+owner tag on the kind:0 is exactly what makes the desktop treat the author as
+an agent (`is_agent: owner_pubkey.is_some()`,
+`desktop/src-tauri/src/nostr_convert.rs:335-346`) — and the mention picker hides
+an agent it cannot find in a directory:
+
+```ts
+if (!isAgent) return "allow";
+if (!directoryReady || ownerOnly === undefined) return "unknown";
+if (!mentionableAgentPubkeys.has(normalized)) return "deny";
+```
+(`desktop/src/features/agents/lib/agentAutocompleteEligibility.ts:116-126`,
+used by `useMentions.ts:257`.) `mentionableAgentPubkeys` is the desktop's own
+managed agents plus **kind:10100 agent-profile** records whose `respond_to` is
+`anyone`/`allowlist` and whose `channel_ids` contain the channel
+(`getMentionableAgentPubkeys`, `relayAgentCanRespondInChannel`). Agents deployed
+by this role are neither: they are self-hosted, `owner-only`, and nothing here
+publishes a kind:10100 (the relay has none — the only writer is Buzz Desktop,
+and `buzz channels set-add-policy` writes a policy-only one that would make
+things worse). So turning attribution on trades the owner label for the picker
+entry in any channel where the agent is a plain `member`; in channels where its
+role is `bot` the picker already hides it either way (`member.role === "bot"`
+sets `isAgent` on its own, `useMentions.ts:327-332`).
+
+Rollback is one variable: drop the agent from `buzz_agent_auth_tags` and
+converge — the role removes `auth_tag` and republishes a kind:0 with no tag,
+byte-identical to the pre-attestation profile.
+
+**What actually fixes both:** a kind:10100 agent-profile record for these
+agents (upstream would have to let something other than the desktop publish
+one), or upstream not gating self-hosted agents out of the picker.
+
+Note that the **observer stream does not need the attestation** — buzz-acp
+resolves its owner from `BUZZ_ACP_AGENT_OWNER`, and the relay-side mapping is
+backfilled directly (below). Attribution is the label, and only the label.
+
+Given the tag, the role writes it to `<agent dir>/auth_tag`, republishes the
+kind:0 with `BUZZ_AUTH_TAG` set (the CLI injects it into every event it signs,
+`crates/buzz-cli/src/client.rs:583-612`), and puts it in the harness
+environment, where buzz-acp uses it as its owner source
+(`owner resolved from BUZZ_AUTH_TAG` in the journal) and attaches it to the
+NIP-42 AUTH event. Changing the tag deletes the `.profile_published` marker so
+the profile is republished; a tag that does not verify against the agent's
+pubkey fails the converge at that step, before it can reach the env file.
+
+## Debug channels: the harness journal, in a room
+
+Each agent's `journalctl -u buzz-agent@<name>` is forwarded into a **private**
+channel `debug-<name>`, so the owner can read what the harness is doing without
+an SSH session. Two moving parts:
+
+* `/usr/local/bin/buzz-agent-logger <name>` — follows the journal, strips ANSI,
+  truncates lines at 800 chars, batches (`buzz_agent_log_flush_seconds`,
+  `buzz_agent_log_max_lines`) and posts each batch as one fenced message.
+* `buzz-agent-logger@<name>.service` — `Restart=on-failure`, so a relay outage
+  or a `journalctl` death is survivable. `journalctl -f` follows the *journal*,
+  not the process, so restarting an agent does not end the stream.
+
+The forwarder posts as its **own** identity (`~devbox/.config/buzz-logs`,
+kind:0 name `logs`, admitted to the relay like any agent) rather than as the
+agent. That is deliberate: the relay refuses posts from non-members
+(`restricted: not a channel member`), so the poster has to be in the channel —
+and putting the *agent* in there would make it a participant in a room that is
+just a log sink. The channel members are the forwarder and the owner (as
+`owner`, so it can be renamed or deleted from the desktop without touching the
+box). There is no feedback loop: the stream is `buzz-agent@%i`, the forwarder
+runs as `buzz-agent-logger@%i`, so neither its own output nor the `buzz` send
+is in what it forwards.
+
+Message size is capped at 16000 bytes per batch because the relay rejects
+content over 65536 (`content exceeds maximum size (N > 65536 bytes)`), and each
+batch passes `--mention <self>`, which makes any bare `@word` in a log line
+presentation-only so an unresolvable mention cannot get the batch rejected.
+
+Channel ids are settled in `<agent dir>/debug_channel`; if that file is lost the
+role finds the channel again by name (`buzz channels search --exact`) instead of
+creating a second one.
+
+## Live session internals: the NIP-AO observer stream
+
+`BUZZ_ACP_RELAY_OBSERVER=true` (`buzz_agent_relay_observer`, upstream default
+`false` — `crates/buzz-acp/src/config.rs:473-475`) makes buzz-acp publish
+**kind 24200** frames: NIP-44-encrypted to the owner, ephemeral, never stored,
+one frame per second max. That is the agent's actual thinking and tool traffic
+(`agent_thought_chunk`, `agent_message_chunk`, `acp_read`, `acp_write`,
+`turn_started`…), where `debug-<name>` is the coarse, persisted harness log.
+
+The owner watches it in **Buzz Desktop**, no setting to turn on:
+
+* while an agent is working, the composer shows a *"… is working"* pill →
+  **Agents working** popover → click the agent (`BotActivityBar.tsx:161-250`);
+* or from a member/profile popover, **"View activity log"**
+  (`UserProfilePopover.tsx:439-447`) / **"View activity"** in the members
+  sidebar;
+* the panel header toggles between **Activity** and **Raw ACP activity**
+  (`AgentSessionThreadPanel.tsx:249`).
+
+The desktop only starts the subscription for a viewer who owns at least one
+managed agent (`observerRelayStore.ts:656-660`).
+
+**One deployment-specific catch.** The relay only accepts a 24200 frame from an
+agent whose owner it already knows, via `users.agent_owner_pubkey`
+(`handlers/event.rs:1007-1057` → `is_agent_owner`). It learns that column from
+the NIP-OA tag on AUTH — but only in the *delegation* branch, and
+`check_relay_membership` returns `Member` and short-circuits before it for a
+pubkey that is already in `relay_members`, which every agent here is
+(`crates/buzz-relay/src/api/mod.rs:74-80`). On a closed relay the column is
+therefore never written and every frame is rejected with
+`restricted: observer frame is not authorized for this agent owner`. The role
+backfills exactly what that branch would have written (one `UPDATE` per agent,
+only when the column is NULL, only when an attestation exists). The relay caches
+the negative answer for five minutes, so after a first-time backfill the stream
+can take that long to come alive.
 
 ## Introductions
 
@@ -112,6 +277,57 @@ dir 0700) with `force: no`: codex refreshes the access token in that file on the
 box, and re-pushing the stashed copy would roll it back to an expired one.
 (`OPENAI_API_KEY` also works if that is the credential you have; put it in the
 env template instead.)
+
+## Claude Code Remote Control: not available on this path
+
+Remote Control (attach to a running Claude Code session from claude.ai/code or
+the mobile app) **cannot be enabled** for the `claude` agent as deployed.
+Verified against the packages installed on buzztest (2026-08-14):
+`@agentclientprotocol/claude-agent-acp` 0.68.0 and its bundled
+`@anthropic-ai/claude-agent-sdk`. Two independent blockers:
+
+1. **The adapter never asks for it.** The SDK does expose the entry point —
+   `enableRemoteControl(...)` on the object `query()` returns
+   (`…/claude-agent-sdk/sdk.mjs:120`, undocumented: it is absent from
+   `sdk.d.ts`) — and the bundled `claude` binary implements the matching
+   `remote_control` control request for SDK-driven sessions (its bridge tags
+   include `remote-control-sdk`). But the adapter never calls it: a grep for
+   `enableRemoteControl|remote_control|remoteControl` over
+   `claude-agent-acp/dist/` returns nothing. Its only injection surface is
+   ACP `session/new` `_meta.claudeCode.options`
+   (`dist/acp-agent.js:4628, 4683`), which buzz-acp does not send, and its own
+   argv handling stops at `--cli`, `--version`, `--hide-claude-auth`
+   (`dist/index.js:8, 38`). `BUZZ_ACP_AGENT_ARGS` does not help: buzz-acp
+   normalizes args to zero for known adapters, and adapter args are not
+   forwarded to the SDK's `claude` subprocess anyway. There is no
+   remote-control env var — the `CLAUDE_CODE_*REMOTE*` family in the binary is
+   about running *inside* Anthropic's cloud sandbox.
+2. **The credential is inference-only.** This box authenticates with
+   `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`), and the CLI refuses
+   Remote Control for exactly that, verbatim from the binary: *"Remote Control
+   requires a full-scope login token. Long-lived tokens (from `claude
+   setup-token` or `CLAUDE_CODE_OAUTH_TOKEN`) are limited to inference-only for
+   security reasons. Run `claude auth login` to use Remote Control."*
+   Reproduced live: `su - devbox -c 'claude remote-control --help'` →
+   *"You must be logged in to use Remote Control."*
+
+`--remote-control [name]` / `--rc` exists on the CLI but is documented as
+*"Start an **interactive** session with Remote Control enabled"*, and the
+SDK-driven process here runs `--output-format stream-json --input-format
+stream-json`.
+
+**What would unblock it:** Zed's `claude-agent-acp` calling
+`queryInstance.enableRemoteControl(...)` behind an ACP option and surfacing the
+bridge session back over ACP, buzz-acp passing that option on `session/new`,
+and Anthropic adding the method to the SDK's public types. Plus, on the box, an
+interactive `claude auth login` as `devbox` replacing the long-lived token —
+which is at odds with an unattended systemd service by design.
+
+The nearest thing that works today is unrelated to the buzz agent: an
+interactive `claude --remote-control` in a shell as `devbox` (still needing the
+full-scope login) gives the owner a *separate* session to drive from the Code
+tab of the Claude app. It does not attach to the agent sitting in the relay.
+The **observer stream** above is the supported way to watch this agent live.
 
 ## Antigravity (agy): blocked on ACP
 
@@ -204,13 +420,17 @@ share it.
 
 See `defaults/main.yml`. Required: `claude_code_oauth_token`,
 `buzz_relay_owner_pubkey` (unless `buzz_agent_respond_to` is `anyone`/`nobody`).
-Optional: `codex_auth_json`, `buzz_agents`.
+Optional: `codex_auth_json`, `buzz_agents`, `buzz_agent_auth_tags` (without it
+the app shows "owner unavailable" and the observer stream stays off),
+`buzz_agent_relay_observer`, `buzz_agent_log_flush_seconds`,
+`buzz_agent_log_max_lines`.
 
 ## Operating it
 
 ```bash
-systemctl status 'buzz-agent@*'
-journalctl -u buzz-agent@codex -f
+systemctl status 'buzz-agent@*' 'buzz-agent-logger@*'
+journalctl -u buzz-agent@codex -f          # or just read #debug-codex
+journalctl -u buzz-agent-logger@codex -f   # the forwarder itself
 systemctl restart buzz-agent@claude
 docker exec $(docker ps -q -f label=com.docker.compose.project=buzz-prod \
                           -f label=com.docker.compose.service=relay) \

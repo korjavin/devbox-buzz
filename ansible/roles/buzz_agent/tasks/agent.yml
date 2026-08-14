@@ -81,6 +81,41 @@
   register: add_member
   changed_when: "'added' in add_member.stdout"
 
+# The desktop reads "managed by <owner>" off a NIP-OA `auth` tag on the kind:0
+# below (nostr_convert.rs::profile_valid_oa_owner_pubkey); with no valid tag it
+# renders "owner unavailable". The tag is signed by the OWNER's key — it cannot
+# be produced here — so it is minted on the owner's machine and handed in.
+# Changing it deletes the marker, which republishes the profile; the CLI
+# verifies the tag against this agent's pubkey and fails closed, so a wrong tag
+# stops the converge here, before it can reach the harness environment.
+# Symmetric on purpose: dropping an agent from buzz_agent_auth_tags removes
+# the file and republishes a kind:0 without the tag, which is the rollback for
+# the mention-picker trade-off documented in the role README.
+- name: Install {{ agent.name }}'s owner attestation
+  copy:
+    content: "{{ buzz_agent_auth_tags[agent.name] }}"
+    dest: "{{ agent_dir }}/auth_tag"
+    owner: "{{ devbox_user }}"
+    group: "{{ devbox_user }}"
+    mode: '0644'
+  register: agent_auth_tag_file
+  when: agent.name in buzz_agent_auth_tags
+
+- name: Remove {{ agent.name }}'s owner attestation
+  file:
+    path: "{{ agent_dir }}/auth_tag"
+    state: absent
+  register: agent_auth_tag_removed
+  when: agent.name not in buzz_agent_auth_tags
+
+- name: Republish {{ agent.name }}'s profile when the attestation changes
+  file:
+    path: "{{ agent_dir }}/.profile_published"
+    state: absent
+  when: >-
+    agent_auth_tag_file.changed | default(false) or
+    agent_auth_tag_removed.changed | default(false)
+
 # Without a kind:0 profile the agent shows as a bare pubkey in every client.
 # Replaceable event, so republishing on re-runs is harmless; the marker file
 # just avoids the relay round-trip on converges.
@@ -89,12 +124,42 @@
   shell: >-
     BUZZ_RELAY_URL={{ buzz_relay_url }}
     BUZZ_PRIVATE_KEY=$(cat {{ agent_dir }}/secret_key)
+    {% if agent.name in buzz_agent_auth_tags %}
+    BUZZ_AUTH_TAG=$(cat {{ agent_dir }}/auth_tag)
+    {% endif %}
     {{ devbox_user_home }}/.local/bin/buzz users set-profile
     --name "{{ agent.name }}"
     --about "{{ agent.about }}"
     && touch {{ agent_dir }}/.profile_published
   args:
     creates: "{{ agent_dir }}/.profile_published"
+
+# The relay only accepts observer frames (kind 24200) from an agent whose
+# owner it knows, via `users.agent_owner_pubkey` (handlers/event.rs
+# handle_agent_observer_event -> db is_agent_owner). It learns that column from
+# a NIP-OA auth tag on AUTH — but only through the delegation branch, and
+# check_relay_membership (api/mod.rs) returns `Member` and short-circuits
+# before it for a pubkey that is already in relay_members, which every agent
+# here is. So on a closed relay the column is never written and every frame is
+# rejected "restricted: observer frame is not authorized for this agent owner".
+# This writes exactly what that branch would have written — the same owner the
+# harness already answers to (BUZZ_ACP_AGENT_OWNER), so it needs no attestation.
+# Upstream fix: materialize the NIP-OA owner for direct members too. Note the
+# relay caches the negative answer for 5 minutes (state.rs
+# observer_owner_cache), so a first-time backfill can take that long to show.
+- name: Backfill {{ agent.name }}'s agent-owner mapping (observer frames)
+  shell: |
+    docker exec -i {{ postgres_container.stdout }} \
+      sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f -' <<'SQL'
+    UPDATE users SET agent_owner_pubkey = decode('{{ buzz_relay_owner_pubkey }}', 'hex')
+     WHERE pubkey = decode('{{ buzz_agent_pubkey }}', 'hex')
+       AND agent_owner_pubkey IS NULL;
+    SQL
+  register: owner_backfill
+  changed_when: "'UPDATE 1' in owner_backfill.stdout"
+  when:
+    - buzz_agent_relay_observer | bool
+    - buzz_relay_owner_pubkey | length > 0
 
 - name: Install {{ agent.name }}'s harness environment file
   template:
@@ -112,6 +177,43 @@
     enabled: yes
     state: started
     daemon_reload: yes
+
+# Settle, don't recreate: the id lands in a state file the forwarder unit
+# reads, and `channels search` finds an existing channel by name if that file
+# was lost (it only sees channels this identity is in — which is why the
+# forwarder, not the agent, creates it). The owner is added as a second owner,
+# so the channel can be renamed or deleted from the desktop without the box.
+- name: Settle {{ agent.name }}'s debug channel
+  become_user: "{{ devbox_user }}"
+  shell: |
+    set -euo pipefail
+    export BUZZ_RELAY_URL={{ buzz_relay_url }}
+    export BUZZ_PRIVATE_KEY=$(cat {{ buzz_agent_logger_dir }}/secret_key)
+    BIN={{ devbox_user_home }}/.local/bin
+    id=$($BIN/buzz channels search --query debug-{{ agent.name }} --exact |
+         python3 -c 'import json,sys; c=json.load(sys.stdin); print(c[0]["channel_id"] if c else "")')
+    if [ -z "$id" ]; then
+      id=$($BIN/buzz channels create --name debug-{{ agent.name }} \
+             --type stream --visibility private \
+             --description "journalctl -u buzz-agent@{{ agent.name }}, forwarded" |
+           python3 -c 'import json,sys; print(json.load(sys.stdin)["channel_id"])')
+    fi
+    $BIN/buzz channels add-member --channel "$id" \
+      --pubkey {{ buzz_relay_owner_pubkey }} --role owner
+    printf %s "$id" > {{ agent_dir }}/debug_channel
+  args:
+    creates: "{{ agent_dir }}/debug_channel"
+    executable: /bin/bash
+  when: buzz_relay_owner_pubkey | length > 0
+  notify: Restart buzz agent loggers
+
+- name: Enable and start buzz-agent-logger@{{ agent.name }}
+  systemd:
+    name: "buzz-agent-logger@{{ agent.name }}"
+    enabled: yes
+    state: started
+    daemon_reload: yes
+  when: buzz_relay_owner_pubkey | length > 0
 
 # How the owner learns a new agent exists and what its pubkey is. `dms open`
 # is idempotent on the relay (it returns the existing conversation), the marker

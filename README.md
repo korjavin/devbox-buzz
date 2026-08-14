@@ -92,6 +92,48 @@ systemctl restart buzz-agent@claude
 If an agent goes quiet, it is almost always the credential: check `journalctl` first, then re-run
 `devbox up mybox` after refreshing the stashed token.
 
+### Watching an agent work
+
+Two views, both in the app:
+
+* **`#debug-claude` / `#debug-codex`** — private channels, one per agent, carrying that agent's systemd
+  journal, batched and posted by a small forwarder on the box. This is the persisted, coarse view: startup
+  banners, reconnects, errors. The agent itself is *not* a member — the channel is a log sink, not a room it
+  works in.
+* **Live session internals** — the harness publishes NIP-AO observer frames (encrypted to your key, ephemeral):
+  the agent's thinking, its tool calls, its ACP traffic. Click the *"… is working"* pill above the composer, or
+  **View activity log** on the agent's profile, and toggle **Raw ACP activity** in the panel header.
+
+### Telling the app who owns your agents
+
+Buzz Desktop labels an agent message with its owner, and shows **"owner unavailable"** when the agent carries no
+proof of one. That proof is a NIP-OA `auth` tag on the agent's profile event, and it is **signed by your key** —
+which is exactly why the box cannot make it: your key never goes there. Mint one per agent on your own machine
+and pass them in:
+
+```bash
+# on YOUR machine, from a checkout of block/buzz
+cargo run -p buzz-sdk --release --example compute_auth_tag -- \
+  "$(kv get secrets/buzz-owner-nsec-hex)" <agent_pubkey_hex> ""
+# -> ["auth","<owner_hex>","","<sig_hex>"]
+```
+
+Agent pubkeys come from the intro DM (or `~devbox/.config/buzz-agent-<name>/public_key`). Feed the tags to the
+role as `buzz_agent_auth_tags`, e.g.
+`-e '{"buzz_agent_auth_tags":{"claude":"[\"auth\",...]","codex":"[\"auth\",...]"}}'`.
+
+**It is off by default, because today it costs you the @mention picker.** The same tag that produces the owner
+label is what makes the desktop classify the author as an agent, and the picker hides agents that are not in its
+managed-agent list or the relay's kind:10100 directory — which a self-hosted agent is not. Turning it on trades
+the label for the autocomplete entry in channels where the agent is a plain member. Both sides of the trade,
+with citations, and the one-variable rollback:
+[role README](ansible/roles/buzz_agent/README.md#owner-attribution-the-apps-owner-unavailable).
+
+**Claude Code's Remote Control does not work for the on-box agent** — the ACP adapter never asks the SDK for it,
+and a `claude setup-token` credential is inference-only, which Remote Control rejects. The observer stream above
+is the supported way to watch this agent live; citations are in the
+[role README](ansible/roles/buzz_agent/README.md#claude-code-remote-control-not-available-on-this-path).
+
 Want a third brain (goose, or your own)? Add one line to `buzz_agents` in
 [`ansible/roles/buzz_agent/defaults/main.yml`](ansible/roles/buzz_agent/defaults/main.yml) — name, npm package,
 adapter binary — and re-run `devbox up`. Existing agents keep their identities.

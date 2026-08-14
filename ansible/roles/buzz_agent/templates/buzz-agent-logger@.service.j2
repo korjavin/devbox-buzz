@@ -1,0 +1,18 @@
+[Unit]
+Description=Journal forwarder (%i agent -> its private debug channel)
+After=buzz-agent@%i.service
+
+[Service]
+User={{ devbox_user }}
+Group={{ devbox_user }}
+# Reading another unit's journal is a group privilege. It happens to work
+# without this on the current box, but that rests on journald's ACLs rather
+# than on anything this role controls — so ask for it explicitly.
+SupplementaryGroups=systemd-journal
+ExecStart=/usr/local/bin/buzz-agent-logger %i
+# The relay may be down or the channel not yet settled: keep retrying.
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

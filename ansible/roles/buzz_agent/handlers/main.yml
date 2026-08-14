@@ -10,3 +10,13 @@
   loop: "{{ buzz_agents }}"
   loop_control:
     label: "{{ item.name }}"
+
+- name: Restart buzz agent loggers
+  systemd:
+    name: "buzz-agent-logger@{{ item.name }}"
+    state: restarted
+    daemon_reload: yes
+  loop: "{{ buzz_agents }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: buzz_relay_owner_pubkey | length > 0
