@@ -4,7 +4,7 @@ buzz_dir: /opt/buzz
 # Pinned to the image built from the commit stacks/buzz was vendored from
 # (see stacks/buzz/README.md). Never track :main here -- an unattended
 # re-provision would silently pull a different relay.
-buzz_image: ghcr.io/block/buzz:sha-0571f54
+buzz_image: ghcr.io/block/buzz:sha-7f61cf4
 
 # Relay HTTP/WebSocket port. Published on 127.0.0.1 only (Caddy fronts the
 # public side), so a host-side agent can reach ws://127.0.0.1:{{ buzz_http_port }}.

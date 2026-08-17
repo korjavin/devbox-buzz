@@ -1,8 +1,10 @@
 # buzz relay stack (vendored)
 
 Vendored from [block/buzz](https://github.com/block/buzz) `deploy/compose/`
-at commit **`0571f5455b1b2aeea7334082f0df9d1f19b22f7d`** (upstream `main`,
-2026-08-13). Upstream docs for this bundle:
+at commit **`0571f5455b1b2aeea7334082f0df9d1f19b22f7d`**; last re-checked
+against upstream `main` at `7f61cf431af1d8f0480a0baf525881a12f2be7f2`
+(2026-08-17 — `deploy/compose/` unchanged since 2026-07-30, so the vendored
+files are still byte-current). Upstream docs for this bundle:
 <https://github.com/block/buzz/blob/main/deploy/compose/README.md>.
 
 `compose.yml` and `run.sh` are byte-for-byte upstream (plus a provenance
@@ -25,10 +27,10 @@ comment). Adaptations, all local and all commented in place:
   adapted copy and is the only thing that writes `/opt/buzz/.env`.
 - `compose.dev.yml` is not vendored (local admin ports/tools, not wanted here).
 
-The image is pinned in the role defaults to `ghcr.io/block/buzz:sha-0571f54`,
-which is the image built from the same commit (digest
-`sha256:72afcc47275e4ec819ddb2d84166eb452fcfd04bb3c1f7068c03e439cd9f2776`, the
-same one `:main` pointed at when this was vendored).
+The image is pinned in the role defaults to `ghcr.io/block/buzz:sha-7f61cf4`,
+built from upstream `main` `7f61cf43` (index digest
+`sha256:4021d7c65e5c79979dc92345c6f8325a347cddb44f5bfea1897b8663758fa292`, the
+same one `:main` pointed at on 2026-08-17).
 
 Requires Docker Compose **v2.24.4+** for the `!override` / `!reset` merge tags.
 
