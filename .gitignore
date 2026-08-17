@@ -29,3 +29,4 @@ override.tf.json
 
 # Agent worktrees / local session state
 .claude/worktrees/
+.beads.gate.lock
